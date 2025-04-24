@@ -121,6 +121,7 @@ def round_to_divisible(x, y):
     return xnew
 
 
+# flashRNN的各种启用配置类
 @dataclass
 class FlashRNNConfig:
     backend: Literal[
@@ -136,21 +137,21 @@ class FlashRNNConfig:
     forward_clipval: Optional[float] = None
     # additional scalar constants that might be modified
     constants: Optional[dict[str, float]] = None
-    # whether all gate aggregations are of the type "R @ y + W @ x + b" or if there is a function g_r(R @ y) involved
-    # this roughly doubles the memory needed to be stored for backward
+    # whether all gate aggregations are of the type "R @ y + W @ x + b" or if there is a function g_r(R @ y) involved 
+    # this roughly doubles the memory （backward需要的内存翻倍） needed to be stored for backward
     simple_agg: bool = True
 
     hidden_dim: int = -1
-    num_heads: int = -1  # this must divide the hidden size, is not yet supported by all versions in this directory
-    head_dim: int = -1  # alternative to num_heads, equals to hidden_dim // num_heads
+    num_heads: int = -1  # this must divide the hidden size （num_heads要被hidden size整除）, is not yet supported by all versions in this directory
+    head_dim: int = -1  # alternative to num_heads, equals to head_dim = hidden_dim // num_heads
     num_states: int = 4  # this is for the sLSTM, a standard LSTM  has 2
 
-    num_gates_r: int = 4  # how many gates take recurrent input
-    num_gates_w: int = 4  # how many gates take external input
+    num_gates_r: int = 4  # how many gates take recurrent input， LSTM 的4个门 input、forget、output、cell gate 都接收上一个时间步的隐藏状态
+    num_gates_w: int = 4  # how many gates take external input，所有门也都接收当前时间步输入向量 x 的投影Wx
     num_gates_i: int = (
-        4  # how many gates interact between cells (i.e. r and w together)
-    )
-    num_gates_t: int = 4  # how many gates are there in total (including biases only)
+        4  # how many gates interact between cells (i.e. r and w together)，LSTM的每个门都参与 recurrent 和 input 的融合
+    )   
+    num_gates_t: int = 4  # how many gates are there in total (including biases only)，4个门 input、forget、output、cell gate
     # the gate order is as follows in case some are reduced (i.e. gates_r)
     # [gates_r ... ...]
     # [... gates_w ...]
@@ -174,6 +175,7 @@ class FlashRNNConfig:
 
     # internal shapes are overwritten by backend
     # if you use the shape when calling from outside you minimize transposes
+    # Literal中是维度标签的简写，例如"TBGHD" => [Time, Batch, Gate, Head, Dim] => x.shape = [T, B, G, H, D]
     _internal_input_shape: Literal["TBGHD", "TBHGD", "TBHDG"] = "TBGHD"
     _internal_recurrent_shape: Literal["GHDP", "HGDP", "HPGD", "HPDG"] = "GHDP"
     _internal_bias_shape: Literal["GHD, HGD, HDG"] = "HDG"
@@ -383,6 +385,11 @@ class FlashRNNConfig:
         )
 
 
+
+'''
+编译并缓存一个 FlashRNN 的 CUDA fused 版模块到 python中使用的类
+被 FlashRNNFuncGeneratorFused 使用
+'''
 class _FlashRNNCUDAFused:
     mod: dict = {}
 
@@ -395,8 +402,12 @@ class _FlashRNNCUDAFused:
             VR = ValueRefinement
             LF = ValueHeuristic.LARGEST_FIRST
             SF = ValueHeuristic.SMALLEST_FIRST
+
+            # 增加value_refinements和constraint_str配置
+
+            # value_refinements：定义调优参数空间
             value_refinements = (
-                VR("FLASHRNN_HIDDEN_DIM", LF),
+                VR("FLASHRNN_HIDDEN_DIM", LF),  #尝试设置 FLASHRNN_HIDDEN_DIM 参数的不同值，并用 Largest First（LF） 的策略优先尝试较大的值
                 VR("FLASHRNN_NUM_HEADS", LF),
                 VR("FLASHRNN_BACKWARD_SHARED_MEMORY_PADDING", SF),
                 VR("FLASHRNN_FORWARD_SHARED_MEMORY_PADDING", SF),
@@ -426,13 +437,14 @@ class _FlashRNNCUDAFused:
                 VR("FLASHRNN_FORWARD_WARP_RECURRENT_CACHED_HIDDEN", LF),
             )
 
+            # constraint_str ：搜索空间的限制条件 和 硬件约束模型
             constraint_str = (
                 """
                 WARP_SIZE == 32;
                 """
                 + (
                     """
-                FLASHRNN_FORWARD_WARP_TILING_DIM_BATCH == [ 8, 16, 32 ];
+                FLASHRNN_FORWARD_WARP_TILING_DIM_BATCH == [ 8, 16, 32 ];    # 在调优时只能取值 8、16、32
                 FLASHRNN_BACKWARD_WARP_TILING_DIM_BATCH == [ 8, 16, 32 ];
                 FLASHRNN_FORWARD_WARP_TILING_DIM_GATE == [ 8, 16, 32 ];
                 FLASHRNN_BACKWARD_WARP_TILING_DIM_HIDDEN == [ 8, 16, 32 ];
@@ -587,6 +599,7 @@ class _FlashRNNCUDAFused:
 
             """
             )
+
             for constant, val in config.constants.items():
                 if isinstance(val, int):
                     constraint_str += f"\n{constant} == {val};\n"
@@ -600,6 +613,8 @@ class _FlashRNNCUDAFused:
                 str(curdir / "util" / "cuda_error.cu"),
             ]
             seq_len = 2
+
+            # 使用load_parametric_and_test_and_bisect编译cuda fused模块到python
             module = load_parametric_and_test_and_bisect(
                 name=name,
                 sources=sources,
@@ -667,6 +682,7 @@ class _FlashRNNCUDAFused:
                     str(curdir / "fused" / f"{config.function}_fused_pointwise.cuh"),
                 ],
             )
+
             cls.mod[cfgdevstr] = module.FlashRNNFuncFused(
                 True,
                 config.batch_size,
@@ -676,6 +692,9 @@ class _FlashRNNCUDAFused:
         return cls.mod[cfgdevstr]
 
 
+'''
+CUDA fused版 kernel的生成函数
+'''
 def FlashRNNFuncGeneratorFused(training, config: FlashRNNConfig):
     flashrnn_cuda = _FlashRNNCUDAFused.instance(config)
     # pad batch size to multiple of 8
@@ -803,13 +822,19 @@ def FlashRNNFuncGeneratorFused(training, config: FlashRNNConfig):
     return FlashRNNFunctionFused
 
 
+'''
+编译并缓存一个 FlashRNN 的 CUDA alternate 版模块到 python中使用的类
+被FlashRNNFuncGenerator使用
+'''
 class _FlashRNNCUDA:
-    mod = {}
+    mod = {}    # 记录特定配置cuda模块的map，所有_FlashRNNCUDA类共享
 
     @classmethod
     def instance(cls, config: FlashRNNConfig):
-        cfgdevstr = repr(config) + f"_{torch.cuda.current_device()}"
-        if cfgdevstr not in cls.mod:
+        cfgdevstr = repr(config) + f"_{torch.cuda.current_device()}"    # 构造一个唯一标识当前module模块配置的 key= config + GPU编号
+        if cfgdevstr not in cls.mod:    # 如果当前配置不在cls.mod中：
+            # JIT方式加载cuda模块到python module
+            # load在cuda_init.py中
             module = load(
                 name=config.function,
                 sources=[
@@ -827,25 +852,45 @@ class _FlashRNNCUDA:
                 ]
                 + config.defines,
             )
+
+            # 从module模块中实例化 FlashRNNFunc 对象并缓存到cls.mod[cfgdevstr]
             cls.mod[cfgdevstr] = module.FlashRNNFunc(
                 True, config.batch_size, config.hidden_dim, config.num_heads
             )
-
+        # 返回已经加载并初始化好的 FlashRNNFunc 对象
         return cls.mod[cfgdevstr]
 
+'''
+CUDA alternate版 kernel的生成函数，生成一个自定义的 PyTorch 自动求导函数类,用于封装 FlashRNN 的前向和反向 CUDA 计算逻辑。
+forward调用流程：
+    Python 调用FlashRNNFuncGenerator生成flashrnn_cuda
+    ↓
+    flashrnn_cuda.forward(...) ⬅️ 在 Python 中被调用
+    ↓
+    module.FlashRNNFunc.forward(...) ⬅️ 通过 JIT 编译返回的模块
+    ↓
+    flashrnn.cc 中注册了名为 "forward" 的函数 对应 FlashRNNFunc::forward（alternate版）
+'''
 
 def FlashRNNFuncGenerator(training, config: FlashRNNConfig):
-    flashrnn_cuda = _FlashRNNCUDA.instance(config=config)
+    flashrnn_cuda = _FlashRNNCUDA.instance(config=config)   # CUDA 后端模块
 
+    # 内部调用cuda kernel类FlashRNNFunction，需要继承自torch.autograd.Function
     class FlashRNNFunction(torch.autograd.Function):
+
+        ### 前向传播
         @staticmethod
+        # 如果启用 自动混合精度AMP，就加上 torch.amp.custom_fwd 装饰器
         @conditional_decorator(
             config.enable_automatic_mixed_precision,
             torch.amp.custom_fwd(
                 device_type="cuda", cast_inputs=DTYPE_DICT[config.dtype]
             ),
         )
+
+        # 调用编译后的 CUDA 模块的 .forward() 
         def forward(ctx, training, *inputs):
+            # 自动混合精度（AMP）
             if config.enable_automatic_mixed_precision:
                 inputs = (
                     inputs[0].to(dtype=config.torch_dtype_w),
@@ -853,12 +898,18 @@ def FlashRNNFuncGenerator(training, config: FlashRNNConfig):
                     inputs[2].to(dtype=config.torch_dtype_r),
                     inputs[3].to(dtype=config.torch_dtype_b),
                 )
+            
+            # 调用flashrnn_cuda的fuse forward
             states, cache_g_r, cache_g_i = flashrnn_cuda.forward(training, *inputs)
 
+            # 保存输入和中间结果，用于反向传播时使用
             ctx.save_for_backward(*inputs[2:], states, cache_g_r, cache_g_i)
             ctx.training = training
+
+            # 返回隐藏状态state
             return states
 
+        ### 反向传播
         @staticmethod
         @once_differentiable
         @conditional_decorator(
@@ -888,7 +939,7 @@ def FlashRNNFuncGenerator(training, config: FlashRNNConfig):
 
     return FlashRNNFunction
 
-
+# 根据 FlashRNNConfig 中的 _internal_input_permutation 来决定是否调整输入张量 x 的维度顺序。
 def _permute_input(config: FlashRNNConfig, x: torch.Tensor) -> torch.Tensor:
     if config._internal_input_permutation is None:
         return x
@@ -954,9 +1005,11 @@ def _zero_state(config: FlashRNNConfig, inp: torch.Tensor) -> torch.Tensor:
     return state[None, :].permute(permute_to("TSBHD", config.output_shape))
 
 
+#  RNN forward函数：由后端类型（vanilla、cuda、cuda_fused）返回不同的前向计算函数 fn。
 def _get_kernel_step(config: FlashRNNConfig):
-    if config.backend == "vanilla":
 
+    # 纯 Python手动实现的网络
+    if config.backend == "vanilla":
         def fn(Wx, states, R, b, **kwargs):
             return flashrnn_forward_step(
                 Wx,
@@ -969,11 +1022,11 @@ def _get_kernel_step(config: FlashRNNConfig):
             )
 
     elif config.backend == "cuda" or config.backend == "cuda_fused":
-
         def fn(Wx, states, R, b, **kwargs):
+            # 生成cuda kernel FlashRNNFuncGenerator实例
             states = FlashRNNFuncGenerator(
                 torch.is_grad_enabled(), config=config
-            ).apply(
+            ).apply(    #注意必须通过 .apply(...) 来运行前向传播并建立计算图，供后续 backward 使用
                 torch.is_grad_enabled(),
                 Wx.contiguous(),
                 states[:, 0].contiguous(),
@@ -984,7 +1037,7 @@ def _get_kernel_step(config: FlashRNNConfig):
 
     return fn
 
-
+# 对_get_kernel_step对扩充
 def _get_kernel(config: FlashRNNConfig):
     if config.backend == "vanilla":
 
@@ -998,7 +1051,7 @@ def _get_kernel(config: FlashRNNConfig):
                 constants=config.constants,
                 **kwargs,
             )
-
+    # 与vanilla不同的是 支持前向+反向一次完成 的优化实现
     elif config.backend == "vanilla_fwbw":
         if config.function == "lstm":
             from .vanilla_fwbw.fwbw import lstm_pt_fwbw
@@ -1028,7 +1081,8 @@ def _get_kernel(config: FlashRNNConfig):
             raise NotImplementedError(
                 f"Function {config.function} not implemented for vanilla_fwbw backend."
             )
-
+        
+    # alternate版 cuda
     elif config.backend == "cuda":
 
         def fn(Wx, states, R, b, **kwargs):
@@ -1110,7 +1164,16 @@ def _get_config(
         dtype_b=DTYPE_DICT_REV[b.dtype],
     )
 
-
+''' FlashRNN 的入口函数
+    Wx: torch.Tensor,                       # [T, B, G_in, N, I] 输入门数据
+    R: torch.Tensor,                        # [H, P, G_r, D] Recurrent 权重
+    b: torch.Tensor,                        # [H, G_b, D] Bias
+    states: Optional[torch.Tensor] = None,  # 初始状态 [1, B, S, N, D]
+    function: str = "lstm",                 # 使用的单元类型（lstm, gru, slstm等）
+    config: Optional[FlashRNNConfig] = None,# 可选的完整配置对象
+    backend: str = "cuda_fused",            # 后端选择
+    dtype: str = "bfloat16",                # 数据精度
+'''
 def flashrnn(
     Wx: torch.Tensor,
     R: torch.Tensor,
@@ -1127,6 +1190,8 @@ def flashrnn(
     kernel = _get_kernel(config)
     if states is None:
         states = _zero_state(config, Wx)
+    
+    # permute 维度调整，确保数据对齐内核
     states = _permute_output_backward(config, states)
     Wx = _permute_input(config, Wx)
     R = _permute_recurrent_weight(config, R)

@@ -1,6 +1,9 @@
 # Copyright 2024 NXAI GmbH
 # Korbinian Poeppel
 
+'''
+封装torch.utils.cpp_extension.load(JIT动态编译和加载 C++/CUDA 扩展模块) 到load
+'''
 import os
 from typing import Sequence, Union
 import logging
@@ -63,8 +66,15 @@ if "CONDA_PREFIX" in os.environ:
         )
 
 
+'''
+    name: 模块名，load会自动使用-DVALUE中的参数作为后缀
+    sources： .cpp .cu的路径，如 sources=["src/add.cpp", "src/add.cu"]
+    编译参数extra_cflags，extra_cuda_cflags，kwargs会被整合到 myargs
+'''
 def load(*, name, sources, extra_cflags=(), extra_cuda_cflags=(), **kwargs):
-    suffix = ""
+    suffix = ""     # 模块后缀名,_f、_h等
+
+    # 处理extra_cflags
     for flag in extra_cflags:
         pref = [st[0] for st in flag[2:].split("=")[0].split("_")]
         if len(pref) > 1:
@@ -85,6 +95,7 @@ def load(*, name, sources, extra_cflags=(), extra_cuda_cflags=(), **kwargs):
         suffix = "_" + suffix
     suffix = suffix[:64]
 
+    # 取消默认 CUDA 限制的一些 flags
     extra_cflags = list(extra_cflags) + [
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -97,16 +108,18 @@ def load(*, name, sources, extra_cflags=(), extra_cuda_cflags=(), **kwargs):
         extra_cflags.append("-isystem")
         extra_cflags.append(eip)
 
+    #  支持 conda 环境：将 conda 环境下的 include/ 添加到头文件路径
     conda_prefix = os.getenv("CONDA_PREFIX")
     if conda_prefix:
         conda_prefix_include = os.path.join(conda_prefix, "include")
         extra_cflags.append(f"-I{conda_prefix_include}")
         extra_cuda_cflags = list(extra_cuda_cflags) + [f"-I{conda_prefix_include}"]
 
+    # 编译参数组装
     myargs = {
         "verbose": True,
         "with_cuda": True,
-        "extra_ldflags": [f"-L{os.environ['CUDA_LIB']}", "-lcublas"],
+        "extra_ldflags": [f"-L{os.environ['CUDA_LIB']}", "-lcublas"],   # 链接 CUDA 和 cuBLAS 库
         "extra_cflags": [*extra_cflags],
         "extra_cuda_cflags": [
             # "-gencode",
@@ -125,10 +138,15 @@ def load(*, name, sources, extra_cflags=(), extra_cuda_cflags=(), **kwargs):
         ],
     }
     LOGGER.info("Kernel compilation arguments", myargs)
-    myargs.update(**kwargs)
+    myargs.update(**kwargs)     # 将传入load的额外参数 **kwargs 也加入到 myargs
+
     # add random waiting time to minimize deadlocks because of badly managed multicompile of pytorch ext
+    # 随机等待防止死锁，避免多个并发 PyTorch 扩展编译时卡死。
     time.sleep(random.random() * 10)
     LOGGER.info(f"Before compilation and loading of {name}.")
+    
     mod = _load(name + suffix, sources, **myargs)
     LOGGER.info(f"After compilation and loading of {name}.")
+
+    # 加载后的模块mod，供 Python 调用
     return mod

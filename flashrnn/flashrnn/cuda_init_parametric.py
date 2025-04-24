@@ -6,6 +6,9 @@ from .cuda_init import defines_to_cflags, load
 
 LOGGER = logging.getLogger(__name__)
 
+'''
+进一步封装cuda_init中的load方法
+'''
 
 def load_parametric(
     *,

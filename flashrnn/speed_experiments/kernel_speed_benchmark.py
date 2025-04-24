@@ -6,7 +6,7 @@ from flashrnn.flashrnn import flashrnn
 from torch import nn
 from haste_pytorch import LSTM as LSTM_haste
 
-"""Benchmarks different kernels.
+"""Benchmarks different kernels. 对各个kernel进行超参数实验
 
 Enter in line vals the different kernels you want to benchmark.
 
@@ -100,6 +100,7 @@ def create_kernel2style_mapping(kernel_names: list[str]) -> list[tuple[str, str]
     return kernel_names2style
 
 
+# 生成(16, 48), (32, 24), (64, 12), (128, 6), (256, 3), (768, 1)等不同的头维度
 def create_head_dimension_configs(
     benchmark_config: KernelSpeedBenchmarkConfig,
 ) -> list[triton.testing.Benchmark]:
@@ -125,7 +126,7 @@ def create_head_dimension_configs(
     )
     return configs
 
-
+# 生成[2, 8, 16, 32, 64, 128, 256] 不同的batch_size
 def create_batch_size_configs(
     benchmark_config: KernelSpeedBenchmarkConfig,
     dh_nh_pairs: list[tuple[int, int]] = [(64, 12), (768, 1)],
@@ -159,7 +160,7 @@ def create_batch_size_configs(
         )
     return configs
 
-
+# 生成[256, 512, 1024, 2048]不同的sequence_length
 def create_sequence_length_configs(
     benchmark_config: KernelSpeedBenchmarkConfig,
 ) -> list[triton.testing.Benchmark]:
@@ -436,7 +437,7 @@ def get_runnable_benchmark(
 
 def paperplot_experiments():
     OUTPUT_DIR = "./outputs_speed_exps_v5"
-    ### head dimension experiment
+    ### head dimension experiment 头维度实验1
     print("====================================")
     print("HEAD DIMENSION EXPERIMENT")
     print("====================================")
@@ -503,7 +504,7 @@ def paperplot_experiments():
     )
     ### =================
 
-    ### batch size experiment
+    ### batch size experiment 实验2
     print("====================================")
     print("BATCH SIZE EXPERIMENT")
     print("====================================")
@@ -567,7 +568,7 @@ def paperplot_experiments():
     )
     ### =================
 
-    ### sequence length experiment
+    ### sequence length experiment 实验3
     print("====================================")
     print("SEQUENCE LENGTH EXPERIMENT")
     print("====================================")
@@ -707,6 +708,7 @@ def debug_experiments():
     ### =================
 
 
+# 额外的batch_size实验
 def paper_plot_experiments_additional():
     OUTPUT_DIR = "./outputs_speed_exps_add_v2"
     ### head dimension experiment

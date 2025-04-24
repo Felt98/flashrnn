@@ -46,6 +46,7 @@ size_combinations = (
 )
 
 
+# 使用pytest进行测试
 class TestLSTM:
     @pytest.mark.parametrize("size_combination", size_combinations)
     def test_sizes_float32(self, size_combination):

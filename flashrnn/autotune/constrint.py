@@ -1,4 +1,5 @@
 # Integer CSP solver file - CONSTRINT
+# 处理 整数变量 CSP 问题（给定约束解方程） 的脚本，支持 ==、<=、% == 0 三种核心约束，面向编译器优化、张量调度场景
 # This script solves CSP problems tied to integer variables
 # and optimized for multiplicative and divisibility constraints (e.g. tiling sizes)
 # It tries to achieve arc consistency, though if ranges explode it opts for keeping

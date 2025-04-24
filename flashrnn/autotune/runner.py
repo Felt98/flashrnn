@@ -22,9 +22,11 @@ def measure(config):
     model = prepare_models(config, which="fused")["fused"]
     input = get_inputs(model, config)
 
+    # 运行模型，并收集执行结果，包括前向和反向传播的 CUDA 时间
     return run_single(model, input)
 
 
+# 测量xlstm库的前向和反向传播的 CUDA 时间
 if __name__ == "__main__":
     args = create_parser()
 

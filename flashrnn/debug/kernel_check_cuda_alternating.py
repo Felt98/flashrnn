@@ -45,7 +45,7 @@ states_initial_mtr = states_initial.clone().to(TGT_DTYPE).detach().requires_grad
 config = _get_config(Wx_mtr, R_mtr, b_mtr, "lstm", "cuda", dtype="bfloat16")
 config.batch_size = 16
 print(config.defines)
-for _ in tqdm(range(WARMUP_ITERS), desc="Warmup - CUDA fused"):
+for _ in tqdm(range(WARMUP_ITERS), desc="Warmup - CUDA alternating"):
     out = (
         flashrnn(
             Wx=Wx_mtr,
@@ -60,7 +60,7 @@ for _ in tqdm(range(WARMUP_ITERS), desc="Warmup - CUDA fused"):
         .backward()
     )
 
-for _ in tqdm(range(ITERS), desc="Warmup - CUDA fused"):
+for _ in tqdm(range(ITERS), desc="Warmup - CUDA alternating"):
     out = (
         flashrnn(
             Wx=Wx_mtr,
