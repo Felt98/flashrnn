@@ -124,7 +124,6 @@ int ForwardPass::Iterate(const cudaStream_t &stream,
 { // Temporary storage for Ry vector [N,H*4]
     // Constants for GEMM
 
-    // scalar_one<T>() 和 scalar_zero<T>() 是在模板代码中生成类型安全的 1 和 0
     static const FLASHRNN_DTYPE_G alpha = scalar_one<FLASHRNN_DTYPE_G>(); // alpha=1f
     static const FLASHRNN_DTYPE_G beta = scalar_zero<FLASHRNN_DTYPE_G>(); // beta=0f
 
@@ -170,6 +169,7 @@ int ForwardPass::IterateInternal(const FLASHRNN_DTYPE_W *x, const FLASHRNN_DTYPE
                                  FLASHRNN_DTYPE_G *g_i, // Output vector (Wx + Ry + b) [B,H*G] ?
                                  FLASHRNN_DTYPE_G *tmp_Ry)
 { // Temporary storage for Ry vector [B,H*G]
+    // scalar_one<T>() 和 scalar_zero<T>() 是在模板代码中生成类型安全的 1 和 0
     static const FLASHRNN_DTYPE_G alpha = scalar_one<FLASHRNN_DTYPE_G>();
     static const FLASHRNN_DTYPE_G beta = scalar_zero<FLASHRNN_DTYPE_G>();
 
@@ -186,11 +186,26 @@ int ForwardPass::IterateInternal(const FLASHRNN_DTYPE_W *x, const FLASHRNN_DTYPE
 
     cublasSetStream(blas_handle_R, stream_R);
 
-    // ？
-    auto res = blas<FLASHRNN_DTYPE_R>::gemmsb(
-        blas_handle_R, CUBLAS_OP_N, CUBLAS_OP_N, FLASHRNN_NUM_GATES_R * head_dim, batch_size, head_dim, &alpha, R,
-        FLASHRNN_NUM_GATES_R * head_dim, FLASHRNN_NUM_GATES_R * head_dim * head_dim, s, hidden_size, head_dim, &beta,
-        tmp_Ry, FLASHRNN_NUM_GATES_R * hidden_size, FLASHRNN_NUM_GATES_R * head_dim, num_heads);
+    // num_heads 并行矩阵乘
+    // R, Weight matrix for recurrent state (Ry) [H,H*4]
+    // s, Cell carry max state [S,B,H]
+    // 似乎只有head = 1 时结果才是正确的
+    auto res =
+        blas<FLASHRNN_DTYPE_R>::gemmsb(blas_handle_R, CUBLAS_OP_N, CUBLAS_OP_N,
+                                       // m,n,k
+                                       FLASHRNN_NUM_GATES_R * head_dim, batch_size, head_dim,
+                                       //
+                                       &alpha,
+                                       //
+                                       R, FLASHRNN_NUM_GATES_R * head_dim, FLASHRNN_NUM_GATES_R * head_dim * head_dim,
+                                       //
+                                       s, hidden_size, head_dim,
+                                       //
+                                       &beta,
+                                       //
+                                       tmp_Ry, FLASHRNN_NUM_GATES_R * hidden_size, FLASHRNN_NUM_GATES_R * head_dim,
+                                       //
+                                       num_heads);
 
     if (res != CUBLAS_STATUS_SUCCESS)
     {
@@ -207,6 +222,9 @@ int ForwardPass::IterateInternal(const FLASHRNN_DTYPE_W *x, const FLASHRNN_DTYPE
     {
         const dim3 gridDim((head_dim + blockDim.x - 1) / blockDim.x, (batch_size + blockDim.y - 1) / blockDim.y,
                            num_heads);
+
+        // 单步前向传播kernel
+        // s_stride = (T + 1) * B * H
         FLASHRNNPointwiseForward<true><<<gridDim, blockDim, 0, stream_R>>>(
             batch_size, hidden_size, num_heads, x, tmp_Ry, b, s, s_stride, s_out, s_out_stride, g_r, g_i);
     }
@@ -263,10 +281,13 @@ int ForwardPass::Run(const int steps,
     cudaEventRecord(event_R, data_->stream);
     cudaStreamWaitEvent(stream_R, event_R);
 
+    // 每个时间步都会调用一次kernel
     for (int t = 0; t < steps; ++t)
     {
         const int BH = batch_size * hidden_size;
         // printf("Iterating \n");
+
+        // 单步前向传播
         res |=
             IterateInternal(x + t * BH * FLASHRNN_NUM_GATES_W, R, b, s + t * BH, (steps + 1) * batch_size * hidden_size,
                             s + (t + 1) * BH, (steps + 1) * batch_size * hidden_size,
