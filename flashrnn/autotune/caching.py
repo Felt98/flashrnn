@@ -24,7 +24,8 @@ def cache_decorator(cache_dir):
             ).hexdigest()
             filepath = os.path.join(cache_dir, key)
 
-            lock = FileLock(filepath + ".lock", mode=0o777)
+            # lock = FileLock(filepath + ".lock", mode=0o777)
+            lock = FileLock(filepath + ".lock")
             res = None
             with lock:
                 # If the result is cached, return it.
