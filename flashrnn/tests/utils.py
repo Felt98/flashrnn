@@ -3,7 +3,7 @@ import sys
 import torch
 
 from flashrnn import FlashRNNConfig, flashrnn
-from flashrnn.flashrnn.flashrnn import _zero_state
+from flashrnn.flashrnn.flashrnn_alternating import _zero_state
 
 
 def torch_dtype_to_str(dtype: torch.dtype):

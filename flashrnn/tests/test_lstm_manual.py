@@ -1,5 +1,5 @@
 import torch
-from flashrnn.flashrnn.flashrnn import flashrnn, _get_config
+from flashrnn.flashrnn.flashrnn_alternating import flashrnn, _get_config
 
 
 if __name__ == "__main__":
