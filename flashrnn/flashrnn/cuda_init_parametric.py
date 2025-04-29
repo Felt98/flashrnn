@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Callable, Sequence
 
-from ..autotune import constrint as cst
+from autotune import constrint as cst
 from .cuda_init import defines_to_cflags, load
 
 LOGGER = logging.getLogger(__name__)

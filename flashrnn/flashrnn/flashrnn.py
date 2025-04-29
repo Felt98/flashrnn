@@ -9,7 +9,7 @@ from typing import Literal, Optional, Sequence, Union
 import torch
 from torch.autograd.function import once_differentiable
 
-from ..autotune.constrint import ValueHeuristic, ValueRefinement
+from autotune.constrint import ValueHeuristic, ValueRefinement
 from .cuda_init import load
 from .cuda_init_parametric import load_parametric_and_test_and_bisect
 from .gpu_info.gpu_info import get_gpu_info

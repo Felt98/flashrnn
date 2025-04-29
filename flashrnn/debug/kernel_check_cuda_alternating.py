@@ -6,7 +6,7 @@ import sys
 
 sys.path.append("..")
 from flashrnn.flashrnn import flashrnn
-from flashrnn.flashrnn.flashrnn import _get_config
+from flashrnn.flashrnn import _get_config
 
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
