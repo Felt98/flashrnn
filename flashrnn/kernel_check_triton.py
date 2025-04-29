@@ -5,8 +5,8 @@ from tqdm import tqdm
 import sys
 
 sys.path.append("..")
-from flashrnn.flashrnn_alternating import flashrnn_alternating
-from flashrnn.flashrnn_alternating import _get_config
+from flashrnn.flashrnn_triton import flashrnn_triton
+from flashrnn.flashrnn_triton import _get_config
 
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -16,7 +16,7 @@ device = "cuda"
 dtype = torch.float32
 TGT_DTYPE = torch.bfloat16
 B = 16  # batch size
-T = 32  # sequence length
+T = 1024  # sequence length
 NG = 4  # number of gates (NGI == NGR)
 NH = 1  # number of heads
 D = 768  # input/hidden (embedding) dimension
@@ -42,33 +42,33 @@ b_mtr = b.clone().to(TGT_DTYPE).detach().requires_grad_(True)
 states_initial_mtr = states_initial.clone().to(TGT_DTYPE).detach().requires_grad_(True)
 
 
-config = _get_config(Wx_mtr, R_mtr, b_mtr, "lstm", "cuda", dtype="bfloat16")
+config = _get_config(Wx_mtr, R_mtr, b_mtr, "lstm", "triton_fused", dtype="bfloat16")
 config.batch_size = 16
 print(config.defines)
-for _ in tqdm(range(WARMUP_ITERS), desc="Warmup - CUDA alternating"):
+for _ in tqdm(range(WARMUP_ITERS), desc="Warmup - CUDA fused"):
     out = (
-        flashrnn_alternating(
+        flashrnn_triton(
             Wx=Wx_mtr,
             R=R_mtr,
             b=b_mtr,
             function="lstm",
             dtype="bfloat16",
-            backend="cuda",
+            backend="triton_fused",
             config=config,
         )[0][0]
         .sum()
         .backward()
     )
 
-for _ in tqdm(range(ITERS), desc="Warmup - CUDA alternating"):
+for _ in tqdm(range(ITERS), desc="Warmup - CUDA fused"):
     out = (
-        flashrnn_alternating(
+        flashrnn_triton(
             Wx=Wx_mtr,
             R=R_mtr,
             b=b_mtr,
             function="lstm",
             dtype="bfloat16",
-            backend="cuda",
+            backend="triton_fused",
             config=config,
         )[0][0]
         .sum()

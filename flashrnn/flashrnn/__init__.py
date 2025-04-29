@@ -1,3 +1,3 @@
-from .flashrnn_alternating import flashrnn, FlashRNNConfig
+from flashrnn_triton import flashrnn_triton, FlashRNNConfig
 
-__all__ = ["flashrnn_alternating", "FlashRNNConfig"]
+__all__ = ["flashrnn_triton", "FlashRNNConfig"]
