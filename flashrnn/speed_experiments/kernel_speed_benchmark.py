@@ -2,9 +2,13 @@ import torch
 import triton
 from dataclasses import dataclass
 from typing import Literal, Callable
+
+import sys
+sys.path.append("..")  # 将上一级目录添加到了 Python 的模块搜索路径中，不然会找不到flashrnn包
 from flashrnn.flashrnn import flashrnn
+
 from torch import nn
-from haste_pytorch import LSTM as LSTM_haste
+# from haste_pytorch import LSTM as LSTM_haste
 
 """Benchmarks different kernels. 对各个kernel进行超参数实验
 
@@ -437,7 +441,7 @@ def get_runnable_benchmark(
 
 def paperplot_experiments():
     OUTPUT_DIR = "./outputs_speed_exps_v5"
-    ### head dimension experiment 头维度实验1
+    ### head dimension experiment 头维度实验1：(16, 48), (32, 24), (64, 12), (128, 6), (256, 3), (768, 1)
     print("====================================")
     print("HEAD DIMENSION EXPERIMENT")
     print("====================================")
@@ -476,8 +480,8 @@ def paperplot_experiments():
             "nn.LSTM--pytorch-float32++fwbw",
             "nn.LSTM--pytorch-float16++fw",
             "nn.LSTM--pytorch-float16++fwbw",
-            "haste.LSTM--pytorch-float32++fw",
-            "haste.LSTM--pytorch-float32++fwbw",
+            # "haste.LSTM--pytorch-float32++fw",
+            # "haste.LSTM--pytorch-float32++fwbw",
             "attention_causal--fa2++fw",
             "attention_causal--fa2++fwbw",
             # "attention_causal--cudnn++fw",
@@ -504,7 +508,7 @@ def paperplot_experiments():
     )
     ### =================
 
-    ### batch size experiment 实验2
+    ### batch size experiment 实验2：[2, 8, 16, 32, 64, 128, 256]
     print("====================================")
     print("BATCH SIZE EXPERIMENT")
     print("====================================")
@@ -568,7 +572,7 @@ def paperplot_experiments():
     )
     ### =================
 
-    ### sequence length experiment 实验3
+    ### sequence length experiment 实验3：[256, 512, 1024, 2048]
     print("====================================")
     print("SEQUENCE LENGTH EXPERIMENT")
     print("====================================")
@@ -747,7 +751,7 @@ def paper_plot_experiments_additional():
         rep=1000,
         dtype="bfloat16",
     )
-
+    # batch_size ：[2, 8, 16, 32, 64, 128, 256]
     batch_size_run_configs_additional = create_batch_size_configs(
         batch_size_add_benchmark_config, dh_nh_pairs=[(768, 1)]
     )
