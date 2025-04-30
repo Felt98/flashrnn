@@ -5,7 +5,7 @@ from tqdm import tqdm
 import sys
 
 sys.path.append("..")
-from flashrnn.flashrnn_alternating import flashrnn_alternating
+from flashrnn.flashrnn_alternating import build_flashrnn_stack
 from flashrnn.flashrnn_alternating import _get_config
 
 
@@ -44,33 +44,7 @@ states_initial_mtr = states_initial.clone().to(TGT_DTYPE).detach().requires_grad
 
 config = _get_config(Wx_mtr, R_mtr, b_mtr, "lstm", "cuda", dtype="bfloat16")
 config.batch_size = 16
-print(config.defines)
-for _ in tqdm(range(WARMUP_ITERS), desc="Warmup - CUDA alternating"):
-    out = (
-        flashrnn_alternating(
-            Wx=Wx_mtr,
-            R=R_mtr,
-            b=b_mtr,
-            function="lstm",
-            dtype="bfloat16",
-            backend="cuda",
-            config=config,
-        )[0][0]
-        .sum()
-        .backward()
-    )
 
-for _ in tqdm(range(ITERS), desc="Warmup - CUDA alternating"):
-    out = (
-        flashrnn_alternating(
-            Wx=Wx_mtr,
-            R=R_mtr,
-            b=b_mtr,
-            function="lstm",
-            dtype="bfloat16",
-            backend="cuda",
-            config=config,
-        )[0][0]
-        .sum()
-        .backward()
-    )
+rnn = build_flashrnn_stack(B, T, NG, NH, D, num_layers=8, config=config)
+for _ in tqdm(range(ITERS), desc="Test - CUDA fused multi layers", file=sys.stdout):
+    out = rnn()[0][0].sum().backward()
