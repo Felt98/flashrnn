@@ -621,6 +621,8 @@ class _FlashRNNCudaLayer(torch.nn.Module):
     def forward(self, states=None):
         if states is None:
             states = _zero_state(self.config, self.Wx)
+        states = _permute_output_backward(self.config, states)
+
         kernel = FlashRNNFuncGenerator(torch.is_grad_enabled(), config=self.config)
         states = kernel.apply(
             torch.is_grad_enabled(),
