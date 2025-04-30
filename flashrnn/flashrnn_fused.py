@@ -28,6 +28,8 @@ DTYPE_DICT = {
     "float32": torch.float32,
     "float64": torch.float64,
 }
+
+# str到torch精度到字典
 DTYPE_DICT_REV = {
     torch.bfloat16: "bfloat16",
     torch.float: "float32",
@@ -394,7 +396,7 @@ class FlashRNNConfig:
 
 
 """
-编译并缓存一个 FlashRNN 的 CUDA fused 版模块到 python中使用的类
+JIT编译并缓存一个 FlashRNN 的 CUDA fused 版模块到 python中使用的类
 被 FlashRNNFuncGeneratorFused 使用
 """
 
@@ -402,6 +404,7 @@ class FlashRNNConfig:
 class _FlashRNNCUDAFused:
     mod: dict = {}
 
+    # 根据FlashRNNConfig 生成一个模型实例保存在哈希表mod（不同config生成不同实例）
     @classmethod
     def instance(cls, config: FlashRNNConfig):
         device_id = torch.cuda.current_device()
@@ -709,6 +712,7 @@ CUDA fused版 kernel的生成函数
 
 
 def FlashRNNFuncGeneratorFused(training, config: FlashRNNConfig):
+    # 根据config JIT编译生成一个flashrnn_cuda实例
     flashrnn_cuda = _FlashRNNCUDAFused.instance(config)
     # pad batch size to multiple of 8
     round_batch_size = (
@@ -717,15 +721,14 @@ def FlashRNNFuncGeneratorFused(training, config: FlashRNNConfig):
         else 16
     )
 
+    # 将cuda kenel 封装成前向和反向函数类
     class FlashRNNFunctionFused(torch.autograd.Function):
         @staticmethod
         @conditional_decorator(
             config.enable_automatic_mixed_precision,
-            torch.cuda.amp.custom_fwd(cast_inputs=DTYPE_DICT[config.dtype]),
-            # torch.cuda.amp.custom_fwd(args...)已经弃用，使用torch.amp.custom_fwd(args..., device_type='cuda')
-            #    torch.amp.custom_fwd(
-            #         device_type="cuda", cast_inputs=DTYPE_DICT[config.dtype]
-            #     ),
+            torch.amp.custom_fwd(
+                device_type="cuda", cast_inputs=DTYPE_DICT[config.dtype]
+            ),
         )
         def forward(ctx, training, *inputs):
             # pad input and state for batch size multiple of 8
@@ -768,8 +771,7 @@ def FlashRNNFuncGeneratorFused(training, config: FlashRNNConfig):
         @staticmethod
         @conditional_decorator(
             config.enable_automatic_mixed_precision,
-            # torch.amp.custom_bwd(device_type="cuda"),
-            torch.cuda.amp.custom_bwd(DTYPE_DICT[config.dtype]),
+            torch.amp.custom_bwd(device_type="cuda"),
         )
         def backward(ctx, states_grads):
             if not ctx.training:
@@ -925,6 +927,161 @@ def _get_config(
     )
 
 
+# 封装成使用kernel的RNN nn.Module
+class _FlashRNNCudaFusedLayer(torch.nn.Module):
+    def __init__(self, Wx, R, b, config=None, dtype="bfloat16"):
+        # if config == None:
+        #     config = _get_config(Wx, R, b, function, backend="cuda_fused", dtype=dtype)
+
+        super(_FlashRNNCudaFusedLayer, self).__init__()
+        self.Wx = _permute_input(config, Wx)
+        self.R = _permute_recurrent_weight(config, R)
+        self.b = _permute_bias(config, b)
+        self.config = config
+
+    def forward(self, states=None):
+        if states is None:
+            states = _zero_state(self.config, self.Wx)
+        kernel = FlashRNNFuncGeneratorFused(torch.is_grad_enabled(), config=self.config)
+        states = kernel.apply(
+            torch.is_grad_enabled(),
+            self.Wx.contiguous(),
+            states[:, 0].contiguous(),
+            self.R.contiguous(),
+            self.b.contiguous(),
+        )
+        # h = states[:, 1:]
+        # last_h = states[:, -1:]
+        # return _permute_output(self.config, h), _permute_output(self.config, last_h)
+        return states
+
+
+class FlashRNNCudaFused(torch.nn.Module):
+    def __init__(
+        self,
+        Wx_list,
+        R_list,
+        b_list,
+        config=None,
+        dtype_str="bfloat16",
+        num_layers=1,
+    ):
+        super().__init__()
+        assert len(Wx_list) == len(R_list) == len(b_list) == num_layers
+        self.num_layers = num_layers
+        self.layers = torch.nn.ModuleList()
+        if config == None:
+            config = _get_config(
+                Wx_list[0],
+                R_list[0],
+                b_list[0],
+                function="lstm",
+                backend="cuda_fused",
+                dtype=dtype_str,
+            )
+        for i in range(num_layers):
+            # config = (
+            #     config_list[i]
+            #     if config_list
+            #     else _get_config(
+            #         Wx_list[i],
+            #         R_list[i],
+            #         b_list[i],
+            #         function="lstm",
+            #         backend="cuda_fused",
+            #         dtype=dtype_str,
+            #     )
+            # )
+
+            self.layers.append(
+                _FlashRNNCudaFusedLayer(Wx_list[i], R_list[i], b_list[i], config)
+            )
+
+        # self.config = self.layers[0].config  # use first layer's config
+        self.config = config  # use first layer's config
+
+    def forward(self, states=None):
+        if states is None:
+            states = _zero_state(self.config, self.layers[0].Wx)
+
+        out = states
+        for layer in self.layers:
+            out = layer(out)
+
+        h = out[:, 1:]
+        last_h = out[:, -1:]
+        return _permute_output(self.config, h), _permute_output(self.config, last_h)
+
+
+def build_flashrnn_stack(
+    batch_size,
+    seq_size,
+    num_gate,
+    num_heads=1,
+    hidden_dim=768,
+    num_layers=1,
+    config=None,
+    dtype_str="bfloat16",
+):
+    dtype = getattr(torch, dtype_str)
+    Wx_list = []
+    R_list = []
+    b_list = []
+    # config_list = []
+
+    # 生成各层网络的输入（Wx，R，b）、配置config
+    for _ in range(num_layers):
+        # Wx shape: [B, T, NG, NH, D]
+        Wx = torch.randn(
+            batch_size,
+            seq_size,
+            num_gate,
+            num_heads,
+            hidden_dim,
+            device="cuda",
+            dtype=dtype,
+            requires_grad=True,
+        )
+
+        # R shape: [NG, NH, D, D]
+        R = torch.randn(
+            num_gate,
+            num_heads,
+            hidden_dim,
+            hidden_dim,
+            device="cuda",
+            dtype=dtype,
+            requires_grad=True,
+        )
+
+        # b shape: [NG, NH, D]
+        b = torch.randn(
+            num_gate,
+            num_heads,
+            hidden_dim,
+            device="cuda",
+            dtype=dtype,
+            requires_grad=True,
+        )
+        if config == None:
+            config = _get_config(
+                Wx, R, b, function="lstm", backend="cuda_fused", dtype=dtype_str
+            )
+
+        Wx_list.append(Wx)
+        R_list.append(R)
+        b_list.append(b)
+    model = FlashRNNCudaFused(
+        Wx_list,
+        R_list,
+        b_list,
+        config=config,
+        dtype_str=dtype_str,
+        num_layers=num_layers,
+    )
+    return model
+
+
 """ FlashRNN 的入口函数
     Wx: torch.Tensor,                       # [T, B, G_in, N, I] 输入门数据
     R: torch.Tensor,                        # [H, P, G_r, D] Recurrent 权重
@@ -962,5 +1119,14 @@ def flashrnn_fused(
     b = _permute_bias(config, b)
 
     # torch.autograd.Function要使用apply调用
-    h, last_h = kernel.apply(torch.is_grad_enabled(), Wx, states, R, b)
+
+    states = kernel.apply(
+        torch.is_grad_enabled(),
+        Wx.contiguous(),
+        states[:, 0].contiguous(),
+        R.contiguous(),
+        b.contiguous(),
+    )
+    h = states[:, 1:]
+    last_h = states[:, -1:]
     return _permute_output(config, h), _permute_output(config, last_h)
