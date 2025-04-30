@@ -939,9 +939,7 @@ class _FlashRNNCudaFusedLayer(torch.nn.Module):
         self.b = _permute_bias(config, b)
         self.config = config
 
-    def forward(self, states=None):
-        if states is None:
-            states = _zero_state(self.config, self.Wx)
+    def forward(self, states):
         kernel = FlashRNNFuncGeneratorFused(torch.is_grad_enabled(), config=self.config)
         states = kernel.apply(
             torch.is_grad_enabled(),
@@ -1003,6 +1001,7 @@ class FlashRNNCudaFused(torch.nn.Module):
     def forward(self, states=None):
         if states is None:
             states = _zero_state(self.config, self.layers[0].Wx)
+        states = _permute_output_backward(self.config, states)
 
         out = states
         for layer in self.layers:
