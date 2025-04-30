@@ -19,7 +19,7 @@ B = 16  # batch size
 T = 1024  # sequence length
 NG = 4  # number of gates (NGI == NGR)
 NH = 1  # number of heads
-D = 768  # input/hidden (embedding) dimension
+D = 512  # input/hidden (embedding) dimension
 NS = 2  # number of states (c, h)
 
 ###

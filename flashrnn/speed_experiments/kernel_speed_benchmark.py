@@ -4,10 +4,14 @@ from dataclasses import dataclass
 from typing import Literal, Callable
 
 import sys
-sys.path.append("..")  # 将上一级目录添加到了 Python 的模块搜索路径中，不然会找不到flashrnn包
+
+sys.path.append(
+    ".."
+)  # 将上一级目录添加到了 Python 的模块搜索路径中，不然会找不到flashrnn包
 from flashrnn.flashrnn import flashrnn
 
 from torch import nn
+
 # from haste_pytorch import LSTM as LSTM_haste
 
 """Benchmarks different kernels. 对各个kernel进行超参数实验
@@ -130,6 +134,7 @@ def create_head_dimension_configs(
     )
     return configs
 
+
 # 生成[2, 8, 16, 32, 64, 128, 256] 不同的batch_size
 def create_batch_size_configs(
     benchmark_config: KernelSpeedBenchmarkConfig,
@@ -163,6 +168,7 @@ def create_batch_size_configs(
             )
         )
     return configs
+
 
 # 生成[256, 512, 1024, 2048]不同的sequence_length
 def create_sequence_length_configs(
@@ -238,7 +244,7 @@ def get_flashrnn_kernel_benchmark_fn(kernel_spec: KernelSpec) -> Callable:
             Wx = Wx.reshape(
                 Wx.shape[0], Wx.shape[1], R.shape[0], R.shape[1], R.shape[2]
             )
-
+        # kernel在这启动
         h_frnn, hlast_frnn = flashrnn_fn(
             Wx=Wx,
             R=R,
@@ -255,6 +261,7 @@ def get_flashrnn_kernel_benchmark_fn(kernel_spec: KernelSpec) -> Callable:
     return kernel_fn
 
 
+# 启动benchmark
 def get_runnable_benchmark(
     run_configs: list[triton.testing.Benchmark],
     benchmark_config: KernelSpeedBenchmarkConfig,
@@ -354,6 +361,8 @@ def get_runnable_benchmark(
                 out = haste_lstm(pt_in)
                 if kernel_spec.fwbw:
                     out[0].sum().backward()
+
+        # cuda 和 triton的输入
         else:
             num_gates = _flashrnn_function_to_num_gates[kernel_spec.function]
             # create input tensors
@@ -412,8 +421,10 @@ def get_runnable_benchmark(
                 gate_linear = None
 
             # get the benchmark function
+            # flashrnn的kernel在这里封装
             kernel_benchmark_fn = get_flashrnn_kernel_benchmark_fn(kernel_spec)
 
+            # 启动kernel
             def run_kernel_fn():
                 kernel_benchmark_fn(
                     Wx_mtr,
@@ -428,6 +439,9 @@ def get_runnable_benchmark(
             f"[NEW CONFIGURATION] Running speedtest for {provider}, with batch size {B}, num heads {NH}, context size {T}, head dim {DH}, dtype {bench_config.dtype}"
         )
         try:
+            # warmup = 热身，不记录时间
+            # rep = 正式运行并计时的重复次数
+            # ms = rep次数运行时间的平均耗时
             ms = triton.testing.do_bench(
                 run_kernel_fn, warmup=bench_config.warmup, rep=bench_config.rep
             )
@@ -498,6 +512,7 @@ def paperplot_experiments():
 
     head_dim_run_configs = create_head_dimension_configs(head_dim_benchmark_config)
 
+    # 启动benchmark
     head_dimension_benchmark_fn = get_runnable_benchmark(
         head_dim_run_configs, head_dim_benchmark_config
     )
@@ -562,10 +577,12 @@ def paperplot_experiments():
 
     batch_size_run_configs = create_batch_size_configs(batch_size_benchmark_config)
 
+    # 启动benchmark，返回评价耗时
     batch_size_benchmark_fn = get_runnable_benchmark(
         batch_size_run_configs, batch_size_benchmark_config
     )
 
+    # 记录数据
     batch_size_benchmark_fn.run(
         save_path=f"{OUTPUT_DIR}/{batch_size_benchmark_config.benchmark_name}",
         print_data=True,
@@ -628,6 +645,7 @@ def paperplot_experiments():
         sequence_length_benchmark_config
     )
 
+    # 启动benchmark
     sequence_length_benchmark_fn = get_runnable_benchmark(
         sequence_length_run_configs, sequence_length_benchmark_config
     )
@@ -701,6 +719,7 @@ def debug_experiments():
 
     head_dim_run_configs = create_head_dimension_configs(head_dim_benchmark_config)
 
+    # 启动benchmark
     head_dimension_benchmark_fn = get_runnable_benchmark(
         head_dim_run_configs, head_dim_benchmark_config
     )
@@ -756,6 +775,7 @@ def paper_plot_experiments_additional():
         batch_size_add_benchmark_config, dh_nh_pairs=[(768, 1)]
     )
 
+    # 启动benchmark
     batch_size_add_benchmark_fn = get_runnable_benchmark(
         batch_size_run_configs_additional, batch_size_add_benchmark_config
     )
