@@ -3,11 +3,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, Sequence, Union
+from .triton_fused.fwbw import lstm_tr_fwbw
 
 import torch
 
-# from .autotune.constrint import ValueHeuristic, ValueRefinement
-from autotune.constrint import ValueHeuristic, ValueRefinement
 
 # from .cuda_init import load
 # from cuda_init_parametric import load_parametric_and_test_and_bisect
@@ -98,7 +97,7 @@ def conditional_decorator(condition, decorator):
 def permute_to(input_shape, output_shape) -> Optional[list[int]]:
     """
     >>> permute_to("ABC", "BAC")
-    (1, 0, 2)
+    (0,1,2) -> (1, 0, 2)
     """
     if input_shape == output_shape:
         return None
@@ -393,8 +392,7 @@ class FlashRNNConfig:
         )
 
 
-
-# 根据 FlashRNNConfig 中的 _internal_input_permutation 来决定是否调整输入张量 x 的维度顺序。
+# 根据 FlashRNNConfig 中的 _internal_input_permutation 来决定重排输入张量 x 的维度顺序。
 def _permute_input(config: FlashRNNConfig, x: torch.Tensor) -> torch.Tensor:
     if config._internal_input_permutation is None:
         return x
@@ -515,7 +513,156 @@ def _get_config(
         dtype_b=DTYPE_DICT_REV[b.dtype],
     )
 
-''' FlashRNN 的入口函数
+
+class _FlashRNNTritonFusedLayer(torch.nn.Module):
+    def __init__(self, Wx, R, b, config):
+        super(_FlashRNNTritonFusedLayer, self).__init__()
+        self.Wx = _permute_input(config, Wx)
+        self.R = _permute_recurrent_weight(config, R)
+        self.b = _permute_bias(config, b)
+        self.config = config
+        self.backward_recurrent_clip_val = config.gradient_recurrent_clipval
+
+    def forward(self, states):
+        states = lstm_tr_fwbw(
+            states_initial=states,
+            Wx=self.Wx,
+            R=self.R,
+            b=self.b,
+            backward_recurrent_clip_val=self.config.gradient_recurrent_clipval,
+            autocast_kernel_dtype=self.config.dtype,
+        )
+        # return states    lstm_tr_fwbw返回的是一个tuple
+        return states
+
+
+class FlashRNNTritonFused(torch.nn.Module):
+    def __init__(
+        self,
+        Wx_list,
+        R_list,
+        b_list,
+        config=None,
+        num_layers=1,
+    ):
+        super().__init__()
+        assert len(Wx_list) == len(R_list) == len(b_list) == num_layers
+        self.num_layers = num_layers
+        self.layers = torch.nn.ModuleList()
+        if config == None:
+            config = _get_config(
+                Wx_list[0],
+                R_list[0],
+                b_list[0],
+                function="lstm",
+                backend="triton_fused",
+            )
+        for i in range(num_layers):
+            # config = (
+            #     config_list[i]
+            #     if config_list
+            #     else _get_config(
+            #         Wx_list[i],
+            #         R_list[i],
+            #         b_list[i],
+            #         function="lstm",
+            #         backend="cuda_fused",
+            #         dtype=dtype_str,
+            #     )
+            # )
+
+            self.layers.append(
+                _FlashRNNTritonFusedLayer(Wx_list[i], R_list[i], b_list[i], config)
+            )
+
+        # self.config = self.layers[0].config  # use first layer's config
+        self.config = config  # use first layer's config
+
+    def forward(self, states=None):
+        if states is None:
+            states = _zero_state(self.config, self.layers[0].Wx)
+        # states = _permute_output_backward(self.config, states)
+
+        out = states
+        h = None
+        last_h = None
+        for layer in self.layers:
+            # 可能存在问题 是传 h 还是 last_h
+            h, last_h = layer(out)
+            out = last_h
+        return h, last_h
+
+
+def build_flashrnn_stack(
+    batch_size,
+    seq_size,
+    num_gate,
+    num_heads=1,
+    hidden_dim=768,
+    num_layers=1,
+    config=None,
+    dtype_str="bfloat16",
+):
+    dtype = getattr(torch, dtype_str)
+    Wx_list = []
+    R_list = []
+    b_list = []
+    # config_list = []
+
+    # 生成各层网络的输入（Wx，R，b）、配置config
+    for _ in range(num_layers):
+        # Wx shape: [B, T, NG, NH, D]
+        Wx = torch.randn(
+            batch_size,
+            seq_size,
+            num_gate,
+            num_heads,
+            hidden_dim,
+            device="cuda",
+            dtype=dtype,
+            requires_grad=True,
+        )
+
+        # R shape: [NG, NH, D, D]
+        R = torch.randn(
+            num_gate,
+            num_heads,
+            hidden_dim,
+            hidden_dim,
+            device="cuda",
+            dtype=dtype,
+            requires_grad=True,
+        )
+
+        # b shape: [NG, NH, D]
+        b = torch.randn(
+            num_gate,
+            num_heads,
+            hidden_dim,
+            device="cuda",
+            dtype=dtype,
+            requires_grad=True,
+        )
+        if config == None:
+            config = _get_config(
+                Wx, R, b, function="lstm", backend="triton_fused", dtype=dtype_str
+            )
+
+        Wx_list.append(Wx)
+        R_list.append(R)
+        b_list.append(b)
+    model = FlashRNNTritonFused(
+        Wx_list,
+        R_list,
+        b_list,
+        config=config,
+        dtype_str=dtype_str,
+        num_layers=num_layers,
+    )
+    return model
+
+
+""" FlashRNN 的入口函数
     Wx: torch.Tensor,                       # [T, B, G_in, N, I] 输入门数据
     R: torch.Tensor,                        # [H, P, G_r, D] Recurrent 权重
     b: torch.Tensor,                        # [H, G_b, D] Bias
@@ -524,7 +671,9 @@ def _get_config(
     config: Optional[FlashRNNConfig] = None,# 可选的完整配置对象
     backend: str = "cuda_fused",            # 后端选择
     dtype: str = "bfloat16",                # 数据精度
-'''
+"""
+
+
 def flashrnn_triton(
     Wx: torch.Tensor,
     R: torch.Tensor,
@@ -549,19 +698,25 @@ def flashrnn_triton(
 
     Returns:
         _type_: _description_
-    """    
+    """
     if config is None:
         config = _get_config(Wx, R, b, function, backend, dtype=dtype)
 
     kernel = _get_kernel(config)
     if states is None:
         states = _zero_state(config, Wx)
-    
-    # permute 维度调整，确保数据对齐内核
+
+    # permute 维度重拍
     states = _permute_output_backward(config, states)
+    print("states shape : ", states.shape)
     Wx = _permute_input(config, Wx)
     R = _permute_recurrent_weight(config, R)
     b = _permute_bias(config, b)
     h, last_h = kernel(Wx, states, R, b)
+    print(" h shape : ", h.shape)
+    print(" last_h shape : ", last_h.shape)
+    print("_permute_output(config, h) shape: ", _permute_output(config, h).shape)
+    print(
+        "_permute_output(config, last_h) shape: ", _permute_output(config, last_h).shape
+    )
     return _permute_output(config, h), _permute_output(config, last_h)
-
