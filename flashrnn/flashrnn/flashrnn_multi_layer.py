@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 from typing import Optional
 from config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
-from flashrnn_alternating import FlashRNNFuncGenerator
-from flashrnn_fused import FlashRNNFuncGeneratorFused
+from flashrnn_alternating import FlashRNNCuda, FlashRNNFuncGenerator
+from flashrnn_fused import FlashRNNCudaFused, FlashRNNFuncGeneratorFused
 import torch
 
 from autotune.constrint import ValueHeuristic, ValueRefinement
@@ -201,31 +201,27 @@ def _get_kernel(config: FlashRNNConfig):
     # alternate版 cuda
     elif config.backend == "cuda":
 
-        def fn(Wx, states, R, b, **kwargs):
-            states = FlashRNNFuncGenerator(
-                torch.is_grad_enabled(), config=config
-            ).apply(
-                torch.is_grad_enabled(),
-                Wx.contiguous(),
-                states[:, 0].contiguous(),
-                R.contiguous(),
-                b.contiguous(),
+        def fn(Wx_list, states, R_list, b_list, num_layers, **kwargs):
+            return FlashRNNCuda(
+                Wx_list,
+                states,
+                R_list,
+                b_list,
+                config=config,
+                num_layers=num_layers,
             )
-            return states[:, 1:], states[:, -1:]
 
     elif config.backend == "cuda_fused":
 
-        def fn(Wx, states, R, b, **kwargs):
-            states = FlashRNNFuncGeneratorFused(
-                torch.is_grad_enabled(), config=config
-            ).apply(
-                torch.is_grad_enabled(),
-                Wx.contiguous(),
-                states[:, 0].contiguous(),
-                R.contiguous(),
-                b.contiguous(),
+        def fn(Wx_list, states, R_list, b_list, num_layers, **kwargs):
+            return FlashRNNCudaFused(
+                Wx_list,
+                states,
+                R_list,
+                b_list,
+                config=config,
+                num_layers=num_layers,
             )
-            return states[:, 1:], states[:, -1:]
 
     elif config.backend == "triton_fused":
         if config.function == "lstm":
@@ -293,10 +289,10 @@ def _get_config(
 """
 
 
-def flashrnn(
-    Wx: torch.Tensor,
-    R: torch.Tensor,
-    b: torch.Tensor,
+def flashrnn_multi_layer(
+    Wx_list: list,
+    R_list: list,
+    b_list: list,
     states: Optional[torch.Tensor] = None,
     function: str = "lstm",
     config: Optional[FlashRNNConfig] = None,
@@ -304,16 +300,18 @@ def flashrnn(
     dtype: str = "bfloat16",
 ):
     if config is None:
-        config = _get_config(Wx, R, b, function, backend, dtype=dtype)
+        config = _get_config(
+            Wx_list[0], R_list[0], b_list[0], function, backend, dtype=dtype
+        )
 
     kernel = _get_kernel(config)
     if states is None:
-        states = _zero_state(config, Wx)
+        states = _zero_state(config, Wx_list[0])
 
     # permute 维度调整，确保数据对齐内核
     states = _permute_output_backward(config, states)
-    Wx = _permute_input(config, Wx)
-    R = _permute_recurrent_weight(config, R)
-    b = _permute_bias(config, b)
-    h, last_h = kernel(Wx, states, R, b)
+    # Wx = _permute_input(config, Wx)
+    # R = _permute_recurrent_weight(config, R)
+    # b = _permute_bias(config, b)
+    h, last_h = kernel(Wx_list, states, R_list, b_list)
     return _permute_output(config, h), _permute_output(config, last_h)
