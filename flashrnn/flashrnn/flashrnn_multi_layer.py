@@ -256,6 +256,66 @@ def _get_kernel(config: FlashRNNConfig):
     return fn
 
 
+def _get_model(config: FlashRNNConfig):
+
+    # alternate版 cuda
+    if config.backend == "cuda":
+
+        def fn(Wx_list, states, R_list, b_list, num_layers, **kwargs):
+            model = FlashRNNCuda(
+                Wx_list,
+                R_list,
+                b_list,
+                config=config,
+                num_layers=num_layers,
+            )
+            return model
+
+    elif config.backend == "cuda_fused":
+
+        def fn(Wx_list, states, R_list, b_list, num_layers, **kwargs):
+            model = FlashRNNCudaFused(
+                Wx_list,
+                R_list,
+                b_list,
+                config=config,
+                num_layers=num_layers,
+            )
+            return model
+
+    elif config.backend == "triton_fused":
+        if config.function == "lstm":
+            # from .triton_fused.fwbw import lstm_tr_fwbw
+
+            def fn(Wx_list, states, R_list, b_list, num_layers, **kwargs):
+                model = FlashRNNTritonFused(
+                    Wx_list,
+                    R_list,
+                    b_list,
+                    config=config,
+                    num_layers=num_layers,
+                )
+                return model
+
+    #     elif config.function == "slstm":
+    #         from .triton_fused.fwbw import slstm_tr_fwbw
+
+    #         def fn(Wx, states, R, b, **kwargs):
+    #             return slstm_tr_fwbw(
+    #                 states_initial=states,
+    #                 Wx=Wx,
+    #                 R=R,
+    #                 b=b,
+    #                 backward_recurrent_clip_val=config.gradient_recurrent_clipval,
+    #                 autocast_kernel_dtype=config.dtype,
+    #             )
+
+    else:
+        raise ValueError(f"Unknown backend {config.backend}")
+
+    return fn
+
+
 def _get_config(
     Wx: torch.Tensor,
     R: torch.Tensor,
@@ -293,7 +353,7 @@ def flashrnn_multi_layer(
     Wx_list: list,
     R_list: list,
     b_list: list,
-    num_layer: int = 1,
+    num_layers: int = 1,
     states: Optional[torch.Tensor] = None,
     function: str = "lstm",
     config: Optional[FlashRNNConfig] = None,
@@ -316,5 +376,51 @@ def flashrnn_multi_layer(
     # Wx = _permute_input(config, Wx)
     # R = _permute_recurrent_weight(config, R)
     # b = _permute_bias(config, b)
-    h, last_h, out = kernel(Wx_list, states, R_list, b_list, num_layer)
+    h, last_h, out = kernel(Wx_list, states, R_list, b_list, num_layers)
     return _permute_output(config, h), _permute_output(config, last_h)
+
+
+def flashrnn_stepwise(
+    Wx_list: list,  # [B, T, G, NH, D]
+    R_list: list,  # List of [G, NH, D, D]
+    b_list: list,  # List of [G, NH, D]
+    num_layers: int = 1,
+    states: Optional[torch.Tensor] = None,
+    function: str = "lstm",
+    config: Optional[FlashRNNConfig] = None,
+    backend: str = "cuda",
+    dtype: str = "bfloat16",
+):
+    if backend in ("vanilla", "vanilla_fwbw"):
+        backend = "cuda_fused"
+    B, T, NG, NH, D = Wx_list[0].shape
+    outputs = []
+
+    # 初始化 dummy Wx（只为模型结构构建）
+
+    if config is None:
+        config = _get_config(
+            Wx_list[0], R_list[0], b_list[0], function, backend, dtype=dtype
+        )
+    # 初始化空状态：Wx[:, :1] 的 shape 是 [B, 1, G, NH, D]
+    if states is None:
+        states = _zero_state(config, Wx_list[0])
+    states = _permute_output_backward(config, states)
+
+    model_func = _get_model(config)
+    model = model_func(Wx_list, states, R_list, b_list, num_layers)
+    for t in range(T):
+        Wx_t = Wx_list[0][:, t : t + 1]  # 当前时间步 Wx_t: [B, 1, G, NH, D]
+        # 更新每一层的 Wx
+        for layer in model.layers:
+            layer.Wx = _permute_input(config, Wx_t)
+
+        h, last_h, out = model(states)
+        outputs.append(h)  # 保存当前的时间步   h：[S, 1, B , NH, D]
+
+        # 仅保留最后一时刻状态，作为下一个时间步的输入
+        states = out
+
+    h_seq = torch.cat(outputs, dim=1)  # shape: [S, T, B, NH, D]
+
+    return _permute_output(config, h_seq), _permute_output(config, last_h)

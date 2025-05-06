@@ -202,9 +202,6 @@ class FlashRNNFuncFused
             TORCH_CHECK(0, "Errors during CUDA kernel calls forward.");
         }
         return {states, gate_cache_r, gate_cache_i};
-        return
-        {
-        }
     }
 
     std::vector<Tensor> backward(Tensor recurrent_kernel_t, Tensor bias, Tensor s, Tensor gate_cache_r,
@@ -290,12 +287,10 @@ class FlashRNNFuncFused
 #endif
     }
 
-    std::vector<Tensor> backward(Tensor recurrent_kernel_t, Tensor bias, Tensor s, Tensor gate_cache_r,
-                                 Tensor gate_cache_i, Tensor ds_new)
+    std::vector<Tensor> backward_gru(Tensor recurrent_kernel_t, Tensor bias, Tensor s, Tensor gate_cache_r,
+                                     Tensor gate_cache_i, Tensor ds_new)
     {
-        return
-        {
-        }
+        return {};
     }
     std::vector<Tensor> backward_cut(Tensor recurrent_kernel_t, Tensor bias, Tensor s, Tensor gate_cache_r,
                                      Tensor gate_cache_i, Tensor ds_new)

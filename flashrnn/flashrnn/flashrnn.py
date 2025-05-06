@@ -3,9 +3,9 @@
 import os
 from pathlib import Path
 from typing import Optional
-from config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
-from flashrnn_alternating import FlashRNNFuncGenerator
-from flashrnn_fused import FlashRNNFuncGeneratorFused
+from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
+from .flashrnn_alternating import FlashRNNFuncGenerator
+from .flashrnn_fused import FlashRNNFuncGeneratorFused
 import torch
 
 from autotune.constrint import ValueHeuristic, ValueRefinement
