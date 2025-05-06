@@ -109,7 +109,8 @@ class ForwardPass
     // R: [H,H*4] the recurrent weight matrix.
     // b: [H*4] the bias vector.
     // x: [T,N,C] the LSTM input for this iteration (N vectors, each with
-    // dimension C). y: [T+1,N,H] the hidden state vectors across all time steps.
+    // dimension C).
+    // y: [T+1,N,H] the hidden state vectors across all time steps.
     // The t=0'th vector should
     //      be set to the desired initial hidden state (typically zeros). The rest
     //      of the vectors will be set by this function. `h[1:,:,:]` forms the

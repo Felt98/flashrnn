@@ -1,14 +1,15 @@
 # Copyright 2024 NXAI GmbH
 # Korbinian Poeppel
 import os
+import torch
 from pathlib import Path
 from typing import Optional
-from config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
-from flashrnn_alternating import FlashRNNCuda, FlashRNNFuncGenerator
-from flashrnn_fused import FlashRNNCudaFused, FlashRNNFuncGeneratorFused
-import torch
+from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV
+from .flashrnn_alternating import FlashRNNCuda, FlashRNNFuncGenerator
+from .flashrnn_fused import FlashRNNCudaFused
 
-from autotune.constrint import ValueHeuristic, ValueRefinement
+from .flashrnn_triton import FlashRNNTritonFused
+
 from .vanilla import (
     flashrnn_forward,
     flashrnn_forward_step,
@@ -150,105 +151,104 @@ def _get_kernel_step(config: FlashRNNConfig):
     return fn
 
 
-# 对_get_kernel_step对扩充
 def _get_kernel(config: FlashRNNConfig):
-    if config.backend == "vanilla":
+    # if config.backend == "vanilla":
 
-        def fn(Wx, states, R, b, **kwargs):
-            return flashrnn_forward(
-                Wx,
-                states,
-                R,
-                b,
-                pointwise_forward=flashrnn_pointwise_function_registry[config.function],
-                constants=config.constants,
-                **kwargs,
-            )
+    #     def fn(Wx, states, R, b, **kwargs):
+    #         return flashrnn_forward(
+    #             Wx,
+    #             states,
+    #             R,
+    #             b,
+    #             pointwise_forward=flashrnn_pointwise_function_registry[config.function],
+    #             constants=config.constants,
+    #             **kwargs,
+    #         )
 
-    # 与vanilla不同的是 支持前向+反向一次完成 的优化实现
-    elif config.backend == "vanilla_fwbw":
-        if config.function == "lstm":
-            from .vanilla_fwbw.fwbw import lstm_pt_fwbw
+    # # 与vanilla不同的是 支持前向+反向一次完成 的优化实现
+    # elif config.backend == "vanilla_fwbw":
+    #     if config.function == "lstm":
+    #         from .vanilla_fwbw.fwbw import lstm_pt_fwbw
 
-            def fn(Wx, states, R, b, **kwargs):
-                return lstm_pt_fwbw(
-                    states_initial=states,
-                    Wx=Wx,
-                    R=R,
-                    b=b,
-                    backward_recurrent_clip_val=config.gradient_recurrent_clipval,
-                    autocast_kernel_dtype=config.dtype,
-                )
+    #         def fn(Wx, states, R, b, **kwargs):
+    #             return lstm_pt_fwbw(
+    #                 states_initial=states,
+    #                 Wx=Wx,
+    #                 R=R,
+    #                 b=b,
+    #                 backward_recurrent_clip_val=config.gradient_recurrent_clipval,
+    #                 autocast_kernel_dtype=config.dtype,
+    #             )
 
-        elif config.function == "slstm":
-            from .vanilla_fwbw.fwbw import slstm_pt_fwbw
+    #     elif config.function == "slstm":
+    #         from .vanilla_fwbw.fwbw import slstm_pt_fwbw
 
-            def fn(Wx, states, R, b, **kwargs):
-                return slstm_pt_fwbw(
-                    states_initial=states,
-                    Wx=Wx,
-                    R=R,
-                    b=b,
-                    backward_recurrent_clip_val=config.gradient_recurrent_clipval,
-                    autocast_kernel_dtype=config.dtype,
-                )
+    #         def fn(Wx, states, R, b, **kwargs):
+    #             return slstm_pt_fwbw(
+    #                 states_initial=states,
+    #                 Wx=Wx,
+    #                 R=R,
+    #                 b=b,
+    #                 backward_recurrent_clip_val=config.gradient_recurrent_clipval,
+    #                 autocast_kernel_dtype=config.dtype,
+    #             )
 
-        else:
-            raise NotImplementedError(
-                f"Function {config.function} not implemented for vanilla_fwbw backend."
-            )
+    #     else:
+    #         raise NotImplementedError(
+    #             f"Function {config.function} not implemented for vanilla_fwbw backend."
+    #         )
 
     # alternate版 cuda
-    elif config.backend == "cuda":
+    if config.backend == "cuda":
 
         def fn(Wx_list, states, R_list, b_list, num_layers, **kwargs):
-            return FlashRNNCuda(
+            model = FlashRNNCuda(
                 Wx_list,
-                states,
                 R_list,
                 b_list,
                 config=config,
                 num_layers=num_layers,
             )
+            return model(states)
 
     elif config.backend == "cuda_fused":
 
         def fn(Wx_list, states, R_list, b_list, num_layers, **kwargs):
-            return FlashRNNCudaFused(
+            model = FlashRNNCudaFused(
                 Wx_list,
-                states,
                 R_list,
                 b_list,
                 config=config,
                 num_layers=num_layers,
             )
+            return model(states)
 
     elif config.backend == "triton_fused":
         if config.function == "lstm":
-            from .triton_fused.fwbw import lstm_tr_fwbw
+            # from .triton_fused.fwbw import lstm_tr_fwbw
 
-            def fn(Wx, states, R, b, **kwargs):
-                return lstm_tr_fwbw(
-                    states_initial=states,
-                    Wx=Wx,
-                    R=R,
-                    b=b,
-                    backward_recurrent_clip_val=config.gradient_recurrent_clipval,
-                    autocast_kernel_dtype=config.dtype,
+            def fn(Wx_list, states, R_list, b_list, num_layers, **kwargs):
+                model = FlashRNNTritonFused(
+                    Wx_list,
+                    R_list,
+                    b_list,
+                    config=config,
+                    num_layers=num_layers,
                 )
+                return model(states)
 
-        elif config.function == "slstm":
-            from .triton_fused.fwbw import slstm_tr_fwbw
+    #     elif config.function == "slstm":
+    #         from .triton_fused.fwbw import slstm_tr_fwbw
 
-            def fn(Wx, states, R, b, **kwargs):
-                return slstm_tr_fwbw(
-                    states_initial=states,
-                    Wx=Wx,
-                    R=R,
-                    b=b,
-                    backward_recurrent_clip_val=config.gradient_recurrent_clipval,
-                    autocast_kernel_dtype=config.dtype,
-                )
+    #         def fn(Wx, states, R, b, **kwargs):
+    #             return slstm_tr_fwbw(
+    #                 states_initial=states,
+    #                 Wx=Wx,
+    #                 R=R,
+    #                 b=b,
+    #                 backward_recurrent_clip_val=config.gradient_recurrent_clipval,
+    #                 autocast_kernel_dtype=config.dtype,
+    #             )
 
     else:
         raise ValueError(f"Unknown backend {config.backend}")
@@ -293,12 +293,15 @@ def flashrnn_multi_layer(
     Wx_list: list,
     R_list: list,
     b_list: list,
+    num_layer: int = 1,
     states: Optional[torch.Tensor] = None,
     function: str = "lstm",
     config: Optional[FlashRNNConfig] = None,
     backend: str = "cuda_fused",
     dtype: str = "bfloat16",
 ):
+    if backend in ("vanilla", "vanilla_fwbw"):
+        backend = "cuda_fused"
     if config is None:
         config = _get_config(
             Wx_list[0], R_list[0], b_list[0], function, backend, dtype=dtype
@@ -313,5 +316,5 @@ def flashrnn_multi_layer(
     # Wx = _permute_input(config, Wx)
     # R = _permute_recurrent_weight(config, R)
     # b = _permute_bias(config, b)
-    h, last_h = kernel(Wx_list, states, R_list, b_list)
+    h, last_h, out = kernel(Wx_list, states, R_list, b_list, num_layer)
     return _permute_output(config, h), _permute_output(config, last_h)

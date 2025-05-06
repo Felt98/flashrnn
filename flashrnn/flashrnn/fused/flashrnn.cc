@@ -135,6 +135,78 @@ class FlashRNNFuncFused
         return {states, gate_cache_r, gate_cache_i};
     }
 
+    std::vector<Tensor> forward_gru(bool training, Tensor x, Tensor s0, Tensor recurrent_kernel, Tensor bias)
+    {
+
+        const auto time_steps = x.size(0);
+        const auto batch_size = x.size(1);
+        const auto num_heads = recurrent_kernel.size(0);
+        const auto head_dim = recurrent_kernel.size(1);
+        const auto hidden_size = head_dim * num_heads;
+
+        CHECK_INPUT(x);
+        CHECK_INPUT(s0);
+        CHECK_INPUT(recurrent_kernel);
+        CHECK_INPUT(bias);
+
+        TORCH_CHECK(x.scalar_type() == typeToTorchDtype<FLASHRNN_DTYPE_W>(), "Bad input type");
+        TORCH_CHECK(s0.scalar_type() == typeToTorchDtype<FLASHRNN_DTYPE_S>(), "Bad input type");
+        TORCH_CHECK(recurrent_kernel.scalar_type() == typeToTorchDtype<FLASHRNN_DTYPE_R>(), "Bad input type");
+        TORCH_CHECK(bias.scalar_type() == typeToTorchDtype<FLASHRNN_DTYPE_B>(), "Bad input type");
+
+        const auto options = x.options();
+        const at::cuda::CUDAGuard guard(options.device_index());
+        int res = 1;
+        Tensor states = torch::empty({FLASHRNN_NUM_STATES, time_steps + 1, batch_size, num_heads, head_dim},
+                                     options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_S>()));
+        Tensor gate_cache_r;
+        Tensor gate_cache_i;
+        // if (training) {
+        gate_cache_r = torch::empty({time_steps, batch_size, num_heads, head_dim, FLASHRNN_NUM_GATES_R},
+                                    options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_G>()));
+#if FLASHRNN_SIMPLE_AGG
+        gate_cache_i = torch::empty({}, options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_G>()));
+#else
+        // this is for both recurrent and input base caches, without additional
+        // bias-only gates
+        gate_cache_i = torch::empty({time_steps, batch_size, num_heads, head_dim, FLASHRNN_NUM_GATES_I},
+                                    options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_G>()));
+#endif
+        // 用于存储 Ry 和 ？
+        Tensor gate_buffer =
+            torch::ones({FLASHRNN_FORWARD_RECURRENT_TILING_COUNT_HIDDEN * FLASHRNN_FORWARD_BLOCK_TILING_COUNT_BATCH *
+                             FLASHRNN_FORWARD_WARP_TILING_COUNT_BATCH * FLASHRNN_FORWARD_WARP_LOOPING_COUNT_BATCH *
+                             FLASHRNN_FORWARD_WARP_TILING_DIM_BATCH,
+                         FLASHRNN_NUM_GATES_R * hidden_size},
+                        options.dtype(torch::kFloat32));
+        for (uint i = 0; i < FLASHRNN_NUM_STATES; i++)
+        {
+            states[i][0] = s0[i];
+        }
+
+        AT_DISPATCH_FLOATING_TYPES_AND_HALF2(
+            x.scalar_type(), "FlashRNNFuncFused.forward", ([&] {
+                fw.Set(training, batch_size, hidden_size, num_heads, at::cuda::getCurrentCUDABlasHandle(),
+                       at::cuda::getCurrentCUDAStream());
+                // Run中调用前向传播的kernel
+                res = fw.RunGRU(time_steps, reinterpret_cast<FLASHRNN_DTYPE_R *>(recurrent_kernel.data_ptr()),
+                                reinterpret_cast<FLASHRNN_DTYPE_B *>(bias.data_ptr()),
+                                reinterpret_cast<FLASHRNN_DTYPE_W *>(x.data_ptr()),
+                                reinterpret_cast<FLASHRNN_DTYPE_S *>(states.data_ptr()),
+                                reinterpret_cast<FLASHRNN_DTYPE_G *>(gate_cache_r.data_ptr()),
+                                reinterpret_cast<FLASHRNN_DTYPE_G *>(gate_cache_i.data_ptr()),
+                                reinterpret_cast<FLASHRNN_ACC_DTYPE *>(gate_buffer.data_ptr()));
+            }));
+        if (res != 0)
+        {
+            TORCH_CHECK(0, "Errors during CUDA kernel calls forward.");
+        }
+        return {states, gate_cache_r, gate_cache_i};
+        return
+        {
+        }
+    }
+
     std::vector<Tensor> backward(Tensor recurrent_kernel_t, Tensor bias, Tensor s, Tensor gate_cache_r,
                                  Tensor gate_cache_i, Tensor ds_new)
     {
@@ -218,6 +290,13 @@ class FlashRNNFuncFused
 #endif
     }
 
+    std::vector<Tensor> backward(Tensor recurrent_kernel_t, Tensor bias, Tensor s, Tensor gate_cache_r,
+                                 Tensor gate_cache_i, Tensor ds_new)
+    {
+        return
+        {
+        }
+    }
     std::vector<Tensor> backward_cut(Tensor recurrent_kernel_t, Tensor bias, Tensor s, Tensor gate_cache_r,
                                      Tensor gate_cache_i, Tensor ds_new)
     {

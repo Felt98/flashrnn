@@ -1,15 +1,16 @@
+import copy
 import os
 from pathlib import Path
 from typing import Optional
-from config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
+from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
 import torch
 
 # from .autotune.constrint import ValueHeuristic, ValueRefinement
 from autotune.constrint import ValueHeuristic, ValueRefinement
 
 # from .cuda_init import load
-from cuda_init_parametric import load_parametric_and_test_and_bisect
-from gpu_info.gpu_info import get_gpu_info
+from .cuda_init_parametric import load_parametric_and_test_and_bisect
+from .gpu_info.gpu_info import get_gpu_info
 
 # from .vanilla import (
 #     flashrnn_forward,
@@ -593,7 +594,6 @@ class _FlashRNNCudaFusedLayer(torch.nn.Module):
         self.config = config
 
     def forward(self, states):
-        print("config layer id: ", self.config.layer_id)
         kernel = FlashRNNFuncGeneratorFused(torch.is_grad_enabled(), config=self.config)
         states = kernel.apply(
             torch.is_grad_enabled(),
@@ -630,32 +630,11 @@ class FlashRNNCudaFused(torch.nn.Module):
                 backend="cuda_fused",
             )
         for i in range(num_layers):
-            # config = (
-            #     config_list[i]
-            #     if config_list
-            #     else _get_config(
-            #         Wx_list[i],
-            #         R_list[i],
-            #         b_list[i],
-            #         function="lstm",
-            #         backend="cuda_fused",
-            #         dtype=dtype_str,
-            #     )
-            # )
 
-            # config.layer_id = i
-
-            layer_config = copy.deepcopy(config)  # 深拷贝
-            layer_config.layer_id = i
-            print("================================ layer i: ", i)
             self.layers.append(
                 # _FlashRNNCudaFusedLayer(Wx_list[i], R_list[i], b_list[i], config)   # 这是浅拷贝，每个layer都是用同一个config
-                _FlashRNNCudaFusedLayer(
-                    Wx_list[i], R_list[i], b_list[i], layer_config
-                )  # 传入深拷贝
+                _FlashRNNCudaFusedLayer(Wx_list[i], R_list[i], b_list[i], config)
             )
-
-        # self.config = self.layers[0].config  # use first layer's config
         self.config = config  # use first layer's config
 
     def forward(self, states=None):
@@ -668,7 +647,7 @@ class FlashRNNCudaFused(torch.nn.Module):
 
         h = out[:, 1:]
         last_h = out[:, -1:]
-        return h, last_h
+        return h, last_h, out
 
 
 def build_flashrnn_stack(

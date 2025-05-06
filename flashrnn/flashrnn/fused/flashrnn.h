@@ -69,7 +69,7 @@
 #define FLASHRNN_BACKWARD_WARP_LOOPING_COUNT_BATCH 1       // Wtlb
 #define FLASHRNN_BACKWARD_WARP_LOOPING_COUNT_HIDDEN 1      // Wlch
 #define FLASHRNN_BACKWARD_WARP_TILING_COUNT_GATE 8         // Wtcg
-#define FLASHRNN_BACKWARD_WARP_RECURRENT_CACHED_GATE 32 // Wrcg optimal for 1024
+#define FLASHRNN_BACKWARD_WARP_RECURRENT_CACHED_GATE 32    // Wrcg optimal for 1024
 
 #define FLASHRNN_BACKWARD_MULTIHEAD_TILING_COUNT 1
 #define FLASHRNN_BACKWARD_SHARED_MEMORY_PADDING 8
@@ -93,95 +93,90 @@
 #define FLASHRNN_ACC_DTYPE float
 #endif
 
-namespace flashrnn_fused {
+namespace flashrnn_fused
+{
 
-class ForwardPass {
-public:
-  // training: `true` if the caller intends to perform a backward pass to
-  // compute gradients. batch_size: the number of training/inference inputs
-  // provided in each tensor. input_size: the dimension of each input vector.
-  // hidden_size: the expected dimension of each output vector.
-  // blas_handle: an initialized cuBLAS handle (see `cublasCreate`).
-  ForwardPass(const bool training, const int batch_size, const int hidden_size,
-              const int num_heads, const cublasHandle_t &blas_handle,
-              const cudaStream_t &stream = 0);
+class ForwardPass
+{
+  public:
+    // training: `true` if the caller intends to perform a backward pass to
+    // compute gradients. batch_size: the number of training/inference inputs
+    // provided in each tensor. input_size: the dimension of each input vector.
+    // hidden_size: the expected dimension of each output vector.
+    // blas_handle: an initialized cuBLAS handle (see `cublasCreate`).
+    ForwardPass(const bool training, const int batch_size, const int hidden_size, const int num_heads,
+                const cublasHandle_t &blas_handle, const cudaStream_t &stream = 0);
 
-  // Releases internal resources.
-  // Blocks until all iterations have completed executing on the GPU.
-  ~ForwardPass();
+    // Releases internal resources.
+    // Blocks until all iterations have completed executing on the GPU.
+    ~ForwardPass();
 
-  // Set internal values for single forward / backward
-  void Set(const bool training, const int batch_size, const int hidden_size,
-           const int num_heads, const cublasHandle_t &blas_handle,
-           const cudaStream_t &stream = 0);
+    // Set internal values for single forward / backward
+    void Set(const bool training, const int batch_size, const int hidden_size, const int num_heads,
+             const cublasHandle_t &blas_handle, const cudaStream_t &stream = 0);
 
-  int Run(const int steps, const FLASHRNN_DTYPE_R *R, const FLASHRNN_DTYPE_B *b,
-          const FLASHRNN_DTYPE_W *x, FLASHRNN_DTYPE_S *s, FLASHRNN_DTYPE_G *g_r,
-          FLASHRNN_DTYPE_G *g_i, FLASHRNN_ACC_DTYPE *gate_buffer);
+    int Run(const int steps, const FLASHRNN_DTYPE_R *R, const FLASHRNN_DTYPE_B *b, const FLASHRNN_DTYPE_W *x,
+            FLASHRNN_DTYPE_S *s, FLASHRNN_DTYPE_G *g_r, FLASHRNN_DTYPE_G *g_i, FLASHRNN_ACC_DTYPE *gate_buffer);
+    int RunGRU(const int steps, const FLASHRNN_DTYPE_R *R, const FLASHRNN_DTYPE_B *b, const FLASHRNN_DTYPE_W *x,
+               FLASHRNN_DTYPE_S *s, FLASHRNN_DTYPE_G *g_r, FLASHRNN_DTYPE_G *g_i, FLASHRNN_ACC_DTYPE *gate_buffer);
 
-private:
-  struct private_data;
-  private_data *data_;
+  private:
+    struct private_data;
+    private_data *data_;
 };
 
-class BackwardPass {
-public:
-  // batch_size: the number of training inputs provided in each tensor.
-  // input_size: the dimension of each input vector.
-  // hidden_size: the expected dimension of each output vector.
-  // blas_handle: an initialized cuBLAS handle (see `cublasCreate`).
-  BackwardPass(const int batch_size, const int hidden_size, const int num_heads,
-               const cublasHandle_t &blas_handle,
-               const cudaStream_t &stream = 0);
+class BackwardPass
+{
+  public:
+    // batch_size: the number of training inputs provided in each tensor.
+    // input_size: the dimension of each input vector.
+    // hidden_size: the expected dimension of each output vector.
+    // blas_handle: an initialized cuBLAS handle (see `cublasCreate`).
+    BackwardPass(const int batch_size, const int hidden_size, const int num_heads, const cublasHandle_t &blas_handle,
+                 const cudaStream_t &stream = 0);
 
-  // Set internal values for single forward / backward
-  void Set(const int batch_size, const int hidden_size, const int num_heads,
-           const cublasHandle_t &blas_handle, const cudaStream_t &stream = 0);
+    // Set internal values for single forward / backward
+    void Set(const int batch_size, const int hidden_size, const int num_heads, const cublasHandle_t &blas_handle,
+             const cudaStream_t &stream = 0);
 
-  // Releases internal resources.
-  // Blocks until all iterations have completed executing on the GPU.
-  ~BackwardPass();
+    // Releases internal resources.
+    // Blocks until all iterations have completed executing on the GPU.
+    ~BackwardPass();
 
-  int Run(const int steps, const FLASHRNN_DTYPE_R *R_t,
-          const FLASHRNN_DTYPE_B *b, const FLASHRNN_DTYPE_S *s,
-          const FLASHRNN_DTYPE_S *ds_new, FLASHRNN_DTYPE_R *dR,
-          FLASHRNN_DTYPE_B *db, FLASHRNN_DTYPE_S *ds, FLASHRNN_DTYPE_G *g_r,
-          FLASHRNN_DTYPE_G *g_i, FLASHRNN_DTYPE_G *g_b,
-          FLASHRNN_ACC_DTYPE *d_state_buffer);
+    int Run(const int steps, const FLASHRNN_DTYPE_R *R_t, const FLASHRNN_DTYPE_B *b, const FLASHRNN_DTYPE_S *s,
+            const FLASHRNN_DTYPE_S *ds_new, FLASHRNN_DTYPE_R *dR, FLASHRNN_DTYPE_B *db, FLASHRNN_DTYPE_S *ds,
+            FLASHRNN_DTYPE_G *g_r, FLASHRNN_DTYPE_G *g_i, FLASHRNN_DTYPE_G *g_b, FLASHRNN_ACC_DTYPE *d_state_buffer);
 
-private:
-  struct private_data;
-  private_data *data_;
+  private:
+    struct private_data;
+    private_data *data_;
 };
 
-class BackwardPassCut {
-public:
-  // batch_size: the number of training inputs provided in each tensor.
-  // input_size: the dimension of each input vector.
-  // hidden_size: the expected dimension of each output vector.
-  // blas_handle: an initialized cuBLAS handle (see `cublasCreate`).
-  BackwardPassCut(const int batch_size, const int hidden_size,
-                  const int num_heads, const cublasHandle_t &blas_handle,
-                  const cudaStream_t &stream = 0);
+class BackwardPassCut
+{
+  public:
+    // batch_size: the number of training inputs provided in each tensor.
+    // input_size: the dimension of each input vector.
+    // hidden_size: the expected dimension of each output vector.
+    // blas_handle: an initialized cuBLAS handle (see `cublasCreate`).
+    BackwardPassCut(const int batch_size, const int hidden_size, const int num_heads, const cublasHandle_t &blas_handle,
+                    const cudaStream_t &stream = 0);
 
-  // Set internal values for single forward / backward
-  void Set(const int batch_size, const int hidden_size, const int num_heads,
-           const cublasHandle_t &blas_handle, const cudaStream_t &stream = 0);
+    // Set internal values for single forward / backward
+    void Set(const int batch_size, const int hidden_size, const int num_heads, const cublasHandle_t &blas_handle,
+             const cudaStream_t &stream = 0);
 
-  // Releases internal resources.
-  // Blocks until all iterations have completed executing on the GPU.
-  ~BackwardPassCut();
+    // Releases internal resources.
+    // Blocks until all iterations have completed executing on the GPU.
+    ~BackwardPassCut();
 
-  int Run(const int steps, const FLASHRNN_DTYPE_R *R_t,
-          const FLASHRNN_DTYPE_B *b, const FLASHRNN_DTYPE_S *s,
-          const FLASHRNN_DTYPE_S *ds_new, FLASHRNN_DTYPE_R *dR,
-          FLASHRNN_DTYPE_B *db, FLASHRNN_DTYPE_S *ds, FLASHRNN_DTYPE_G *g_r,
-          FLASHRNN_DTYPE_G *g_i, FLASHRNN_DTYPE_G *g_bias,
-          FLASHRNN_ACC_DTYPE *d_state_buffer);
+    int Run(const int steps, const FLASHRNN_DTYPE_R *R_t, const FLASHRNN_DTYPE_B *b, const FLASHRNN_DTYPE_S *s,
+            const FLASHRNN_DTYPE_S *ds_new, FLASHRNN_DTYPE_R *dR, FLASHRNN_DTYPE_B *db, FLASHRNN_DTYPE_S *ds,
+            FLASHRNN_DTYPE_G *g_r, FLASHRNN_DTYPE_G *g_i, FLASHRNN_DTYPE_G *g_bias, FLASHRNN_ACC_DTYPE *d_state_buffer);
 
-private:
-  struct private_data;
-  private_data *data_;
+  private:
+    struct private_data;
+    private_data *data_;
 };
 
 } // namespace flashrnn_fused

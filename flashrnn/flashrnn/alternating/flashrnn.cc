@@ -52,6 +52,11 @@ class FlashRNNFunc
     }
 
     // python API将调用这个forward函数
+    // training: torch.is_grad_enabled()
+    // x: Wx [T, B, NH, NG, D]
+    // s0: input states [NS, B, NH, D]
+    // recurrent_kernel : R [NH ,D, NG, D]
+    // bias: B[NH, NG, D]
     std::vector<Tensor> forward(bool training, Tensor x, Tensor s0, Tensor recurrent_kernel, Tensor bias)
     {
         const auto time_steps = x.size(0);
@@ -61,19 +66,26 @@ class FlashRNNFunc
         const auto head_dim = recurrent_kernel.size(1);
         const auto hidden_size = head_dim * num_heads;
 
+        // 输入类型检查
         CHECK_INPUT(x);
         CHECK_INPUT(s0);
         CHECK_INPUT(recurrent_kernel);
         CHECK_INPUT(bias);
 
+        // 输入精度检查
         TORCH_CHECK(x.scalar_type() == typeToTorchDtype<FLASHRNN_DTYPE_W>(), "Bad input type");
         TORCH_CHECK(s0.scalar_type() == typeToTorchDtype<FLASHRNN_DTYPE_S>(), "Bad input type");
         TORCH_CHECK(recurrent_kernel.scalar_type() == typeToTorchDtype<FLASHRNN_DTYPE_R>(), "Bad input type");
         TORCH_CHECK(bias.scalar_type() == typeToTorchDtype<FLASHRNN_DTYPE_B>(), "Bad input type");
 
+        // options: TensorOptions(dtype, device, requires_grad)
         const auto options = x.options();
+        // at::cuda::CUDAGuard 是一个 RAII（资源获取即初始化）类型的类，用于设置并恢复当前 CUDA 设备上下文
+        // 用于多卡机器，加上 CUDAGuard 后，会暂时切到 x 所在设备, 而不是默认设备
         const at::cuda::CUDAGuard guard(options.device_index());
         int res = 1;
+
+        // 整个序列的states： [NS, T+1,B, NH, D]
         Tensor states = torch::empty({FLASHRNN_NUM_STATES, time_steps + 1, batch_size, num_heads, head_dim},
                                      options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_S>()));
 
@@ -91,6 +103,7 @@ class FlashRNNFunc
 #endif
         Tensor tmp_Ry = torch::empty({batch_size, hidden_size * FLASHRNN_NUM_GATES_R},
                                      options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_G>()));
+        // 各个state在T=0的值赋给 state[i][0]
         for (uint i = 0; i < FLASHRNN_NUM_STATES; i++)
         {
             states[i][0] = s0[i];

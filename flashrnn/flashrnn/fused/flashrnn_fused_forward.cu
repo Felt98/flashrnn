@@ -404,7 +404,7 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
                         }
                         // accumulating matrix multiplications
 
-                                                // 使用R寄存器数据进行矩阵乘 R@states
+                        // 使用R寄存器数据进行矩阵乘 R@states
 #if FLASHRNN_FORWARD_WARP_RECURRENT_CACHED_HIDDEN > 0
                         for (uint wrch_idx = 0; wrch_idx < FWRCH; wrch_idx++)
                         {

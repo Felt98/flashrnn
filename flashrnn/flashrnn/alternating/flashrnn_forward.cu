@@ -158,16 +158,17 @@ int ForwardPass::Iterate(const cudaStream_t &stream,
     return 0;
 }
 
-int ForwardPass::IterateInternal(const FLASHRNN_DTYPE_W *x, const FLASHRNN_DTYPE_R *R,
-                                 // Weight matrix for recurrent state (Ry) [y,H*4]
-                                 const FLASHRNN_DTYPE_B *b, // Bias for gates (Wx + Ry + b) [H*4]
-                                 const FLASHRNN_DTYPE_S *s, // Cell carry max state [S,B,H]
-                                 const uint s_stride,
-                                 FLASHRNN_DTYPE_S *s_out, // Output recurrent state [S,B,H]
-                                 const uint s_out_stride,
-                                 FLASHRNN_DTYPE_G *g_r, // Output vector (Wx + Ry + b) [B,H*G] ?
-                                 FLASHRNN_DTYPE_G *g_i, // Output vector (Wx + Ry + b) [B,H*G] ?
-                                 FLASHRNN_DTYPE_G *tmp_Ry)
+int ForwardPass::IterateInternal(
+    const FLASHRNN_DTYPE_W *x, // Wx[t] : [B,NH,NG,D]
+    const FLASHRNN_DTYPE_R *R, // Weight matrix for recurrent state (Ry) [y,H*4]
+    const FLASHRNN_DTYPE_B *b, // Bias for gates (Wx + Ry + b) [H*4]
+    const FLASHRNN_DTYPE_S *s, // states[Ns][t]: 时间步为 t 的 state, Cell carry max state [B,H]
+    const uint s_stride,
+    FLASHRNN_DTYPE_S *s_out, // states[Ns][t+1]: Output recurrent state [B,H]
+    const uint s_out_stride,
+    FLASHRNN_DTYPE_G *g_r, // Output vector (Wx + Ry + b) [B,H*G] ?
+    FLASHRNN_DTYPE_G *g_i, // Output vector (Wx + Ry + b) [B,H*G] ?
+    FLASHRNN_DTYPE_G *tmp_Ry)
 { // Temporary storage for Ry vector [B,H*G]
     // scalar_one<T>() 和 scalar_zero<T>() 是在模板代码中生成类型安全的 1 和 0
     static const FLASHRNN_DTYPE_G alpha = scalar_one<FLASHRNN_DTYPE_G>();
@@ -190,6 +191,7 @@ int ForwardPass::IterateInternal(const FLASHRNN_DTYPE_W *x, const FLASHRNN_DTYPE
     // R, Weight matrix for recurrent state (Ry) [H,H*4]
     // s, Cell carry max state [S,B,H]
     // 似乎只有head = 1 时结果才是正确的
+    // tmp_Ry = R @ states[0][t] , 注意只和第0状态相乘
     auto res =
         blas<FLASHRNN_DTYPE_R>::gemmsb(blas_handle_R, CUBLAS_OP_N, CUBLAS_OP_N,
                                        // m,n,k
@@ -254,8 +256,8 @@ int ForwardPass::Run(const int steps,
                      FLASHRNN_DTYPE_G *tmp_Ry)
 { // Temporary storage for Ry vector [N,H*4]
 
-    static const FLASHRNN_DTYPE_R alpha = scalar_one<FLASHRNN_DTYPE_R>();
-    static const FLASHRNN_DTYPE_R beta = scalar_zero<FLASHRNN_DTYPE_R>();
+    static const FLASHRNN_DTYPE_R alpha = scalar_one<FLASHRNN_DTYPE_R>(); // 1.0
+    static const FLASHRNN_DTYPE_R beta = scalar_zero<FLASHRNN_DTYPE_R>(); // 0.0
 
     const blas<void>::set_pointer_mode scoped1(data_->main_blas_handle);
 
@@ -288,10 +290,13 @@ int ForwardPass::Run(const int steps,
         // printf("Iterating \n");
 
         // 单步前向传播
-        res |=
-            IterateInternal(x + t * BH * FLASHRNN_NUM_GATES_W, R, b, s + t * BH, (steps + 1) * batch_size * hidden_size,
-                            s + (t + 1) * BH, (steps + 1) * batch_size * hidden_size,
-                            g_r + t * BH * FLASHRNN_NUM_GATES_R, g_i + t * BH * FLASHRNN_NUM_GATES_I, tmp_Ry);
+        // Wx[t] = x + t * BH * FLASHRNN_NUM_GATES_W
+        // states[Ns][t] = s + t * BH
+        // s_stride = s_out_stride = (steps + 1) * BH  , 每个状态之间的步长  states[0] + s_stride = states[1]
+        // s_out = states[Ns][t+1]
+        res |= IterateInternal(x + t * BH * FLASHRNN_NUM_GATES_W, R, b, s + t * BH, (steps + 1) * BH, s + (t + 1) * BH,
+                               (steps + 1) * BH, g_r + t * BH * FLASHRNN_NUM_GATES_R,
+                               g_i + t * BH * FLASHRNN_NUM_GATES_I, tmp_Ry);
     }
     cudaEventRecord(event_R, stream_R);
     if (use_input_stream)

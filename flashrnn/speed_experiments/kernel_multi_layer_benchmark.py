@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal
 import torch
+from torch import nn
 import triton
 from dataclasses import dataclass
 from typing import Literal, Callable
@@ -10,15 +11,15 @@ import sys
 sys.path.append(
     ".."
 )  # 将上一级目录添加到了 Python 的模块搜索路径中，不然会找不到flashrnn包
-from flashrnn.flashrnn import flashrnn
 
-from torch import nn
+from flashrnn.flashrnn_multi_layer import flashrnn_multi_layer
 
 
 _flashrnn_function_to_num_gates = {
     "lstm": 4,
     "slstm": 4,
 }
+OUTPUT_DIR = "./outputs_speed_multi_layer"
 
 
 @dataclass
@@ -48,7 +49,7 @@ class KernelSpeedBenchmarkConfig:
     benchmark_name: str
     kernel_specifiers: list[str]
     warmup: int = 500
-    rep: int = 2000
+    rep: int = 500
     dtype: Literal["float16", "bfloat16", "float32"] = "bfloat16"
 
 
@@ -129,9 +130,10 @@ def create_multi_layer_configs(
 
     configs.append(
         triton.testing.Benchmark(
+            # D不能低于32
             x_names=["LAYER", "DH", "NH"],
             x_vals=[
-                (2, 4, 16),
+                (2, 32, 2),
                 (2, 64, 1),
                 (4, 32, 16),
                 (4, 512, 1),
@@ -153,31 +155,36 @@ def create_multi_layer_configs(
     return configs
 
 
-def get_flashrnn_muli_layer_kernel_benchmark_fn(kernel_spec: KernelSpec) -> Callable:
+def get_flashrnn_multi_layer_kernel_benchmark_fn(kernel_spec: KernelSpec) -> Callable:
     def kernel_fn(
-        Wx: torch.Tensor,
-        R: torch.Tensor,
-        b: torch.Tensor,
+        Wx_list: list,
+        R_list: list,
+        b_list: list,
         LAYER: int,
         dtype: str,
         gate_linear: nn.Module = None,
-        x_only: torch.Tensor = None,
+        x_only_list: list = None,
     ):
         if kernel_spec.use_torch_compile:
-            flashrnn_fn = torch.compile(flashrnn)
+            flashrnn_fn = torch.compile(flashrnn_multi_layer)
         else:
-            flashrnn_fn = flashrnn
+            flashrnn_fn = flashrnn_multi_layer
 
         if gate_linear is not None:
-            Wx = gate_linear(x_only)
-            Wx = Wx.reshape(
-                Wx.shape[0], Wx.shape[1], R.shape[0], R.shape[1], R.shape[2]
-            )
+            R = R_list[0]
+            Wx_list = []
+            # for Wx, x_only in Wx_list, x_only_list:
+            for x_only in x_only_list:
+                Wx = gate_linear(x_only)
+                Wx = Wx.reshape(
+                    Wx.shape[0], Wx.shape[1], R.shape[0], R.shape[1], R.shape[2]
+                )
+                Wx_list.append(Wx)
         # kernel在这启动
         h_frnn, hlast_frnn = flashrnn_fn(
-            Wx=Wx,
-            R=R,
-            b=b,
+            Wx_list,
+            R_list,
+            b_list,
             num_layer=LAYER,
             states=None,
             function=kernel_spec.function,
@@ -225,8 +232,8 @@ def get_runnable_benchmark(
             ], f"Invalid dtype for nn.LSTM, got {nn_lstm_dtype_str}"
             nn_lstm_dtype = getattr(torch, nn_lstm_dtype_str)
             torch_lstm = torch.nn.LSTM(
-                DH,
-                DH,
+                input_size=DH * NH,
+                hidden_size=DH * NH,
                 num_layers=LAYER,
                 bias=True,
                 batch_first=True,
@@ -284,7 +291,7 @@ def get_runnable_benchmark(
 
             # get the benchmark function
             # flashrnn的kernel在这里封装
-            kernel_benchmark_fn = get_flashrnn_muli_layer_kernel_benchmark_fn(
+            kernel_benchmark_fn = get_flashrnn_multi_layer_kernel_benchmark_fn(
                 kernel_spec
             )
 
@@ -297,7 +304,7 @@ def get_runnable_benchmark(
                     LAYER,
                     bench_config.dtype,
                     gate_linear=gate_linear,
-                    x_only=x_list,
+                    x_only_list=x_list,
                 )
 
         print(
@@ -310,6 +317,7 @@ def get_runnable_benchmark(
             ms = triton.testing.do_bench(
                 run_kernel_fn, warmup=bench_config.warmup, rep=bench_config.rep
             )
+            print("=========== ms is: ======== ", ms)
         except Exception as e:
             print(f"Error: {e}")
             ms = float("nan")
@@ -320,10 +328,9 @@ def get_runnable_benchmark(
 
 # 额外的batch_size实验
 def paper_plot_experiments_additional():
-    OUTPUT_DIR = "./outputs_speed_exps_add_v2"
     ### head dimension experiment
     print("====================================")
-    print("BATCH SIZE ADDITIONAL EXPERIMENT")
+    print("MULTI LAYER EXPERIMENT")
     print("====================================")
     batch_size_add_benchmark_config = KernelSpeedBenchmarkConfig(
         benchmark_name="batch_size_exp_additional",
@@ -332,21 +339,15 @@ def paper_plot_experiments_additional():
             # fw
             # "lstm--vanilla++fw",
             # "lstm--vanilla_fwbw++fw",
-            # "lstm--triton_fused++fw",
+            "lstm--triton_fused++fw",
             "lstm--cuda_fused++fw",
             "lstm--cuda++fw",
-            # "lstm--triton_fused-withlinear++fw",
-            "lstm--cuda_fused-withlinear++fw",
-            "lstm--cuda-withlinear++fw",
             # fwbw
             # "lstm--vanilla_fwbw++fwbw",
             # "lstm--vanilla++fwbw",
-            # "lstm--triton_fused++fwbw",
+            "lstm--triton_fused++fwbw",
             "lstm--cuda_fused++fwbw",
             "lstm--cuda++fwbw",
-            # "lstm--triton_fused-withlinear++fwbw",
-            "lstm--cuda_fused-withlinear++fwbw",
-            "lstm--cuda-withlinear++fwbw",
             ## baselines
             "nn.LSTM--pytorch-float32++fw",
             "nn.LSTM--pytorch-float32++fwbw",
@@ -354,8 +355,8 @@ def paper_plot_experiments_additional():
             "nn.LSTM--pytorch-float16++fwbw",
         ],
         warmup=25,
-        rep=1000,
-        dtype="bfloat16",
+        rep=500,
+        dtype="float32",
     )
     #
     # B = 16, T = 256
@@ -374,3 +375,7 @@ def paper_plot_experiments_additional():
         print_data=True,
     )
     ### =================
+
+
+if __name__ == "__main__":
+    paper_plot_experiments_additional()

@@ -1,10 +1,11 @@
 # Copyright 2024 NXAI GmbH
 # Korbinian Poeppel
 
+import copy
 import os
 from pathlib import Path
 from typing import Optional
-from config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
+from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
 import torch
 
 from torch.autograd.function import once_differentiable
@@ -370,7 +371,7 @@ class FlashRNNCuda(torch.nn.Module):
 
         h = out[:, 1:]
         last_h = out[:, -1:]
-        return h, last_h
+        return h, last_h, out
 
 
 def build_flashrnn_stack(

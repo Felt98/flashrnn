@@ -68,6 +68,7 @@ __global__ void FLASHRNNPointwiseForward(const int batch_dim, const int hidden_d
     //   }
     // #endif
 
+    // currunt c状态
     const auto c_cur = type2float(s[output_idx + 1 * s_stride]);
     const auto iraw =
         add_g(type2float(Wx[i_idx]),
