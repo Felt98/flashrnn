@@ -188,8 +188,8 @@ int ForwardPass::IterateInternal(
     cublasSetStream(blas_handle_R, stream_R);
 
     // num_heads 并行矩阵乘
-    // R, Weight matrix for recurrent state (Ry) [H,H*4]
-    // s, Cell carry max state [S,B,H]
+    // R, Weight matrix for recurrent state (Ry) [NG ✖️ H ✖️ D]
+    // s, Cell carry max state [S,B,H]     [B ✖️ H]
     // 似乎只有head = 1 时结果才是正确的
     // tmp_Ry = R @ states[0][t] , 注意只和第0状态相乘
     auto res =
@@ -201,7 +201,7 @@ int ForwardPass::IterateInternal(
                                        //
                                        R, FLASHRNN_NUM_GATES_R * head_dim, FLASHRNN_NUM_GATES_R * head_dim * head_dim,
                                        //
-                                       s, hidden_size, head_dim,
+                                       s, hidden_size, head_dim,      // strikeB 不应该是 0 ？ 
                                        //
                                        &beta,
                                        //

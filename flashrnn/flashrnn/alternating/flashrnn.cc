@@ -65,7 +65,6 @@ class FlashRNNFunc
 
         const auto head_dim = recurrent_kernel.size(1);
         const auto hidden_size = head_dim * num_heads;
-
         // 输入类型检查
         CHECK_INPUT(x);
         CHECK_INPUT(s0);

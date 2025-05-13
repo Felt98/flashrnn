@@ -8,6 +8,12 @@ import torch
 
 LOGGER = logging.getLogger(__name__)
 
+_flashrnn_function_to_num_states = {
+    "gru": 1,
+    "lstm": 2,
+    "slstm": 2,
+}
+
 DTYPE_DICT = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
@@ -348,3 +354,25 @@ class FlashRNNConfig:
                 ]
             )
         )
+
+
+def _get_config(
+    Wx: torch.Tensor,
+    R: torch.Tensor,
+    b: torch.Tensor,
+    function: str,
+    backend: str,
+    dtype: Optional[str],
+) -> FlashRNNConfig:
+    return FlashRNNConfig(
+        head_dim=Wx.shape[4],
+        num_heads=Wx.shape[3],
+        batch_size=Wx.shape[0],
+        function=function,
+        num_states=_flashrnn_function_to_num_states[function],
+        backend=backend,
+        dtype=dtype if dtype is not None else "bfloat16",
+        dtype_w=DTYPE_DICT_REV[Wx.dtype],
+        dtype_r=DTYPE_DICT_REV[R.dtype],
+        dtype_b=DTYPE_DICT_REV[b.dtype],
+    )

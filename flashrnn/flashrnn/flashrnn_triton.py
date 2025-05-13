@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV
+from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, _get_config
 
 from .triton_fused.fwbw import lstm_tr_fwbw
 
@@ -144,27 +144,6 @@ def _get_kernel(config: FlashRNNConfig):
     return fn
 
 
-def _get_config(
-    Wx: torch.Tensor,
-    R: torch.Tensor,
-    b: torch.Tensor,
-    function: str,
-    backend: str,
-    dtype: Optional[str],
-) -> FlashRNNConfig:
-    return FlashRNNConfig(
-        head_dim=Wx.shape[4],
-        num_heads=Wx.shape[3],
-        batch_size=Wx.shape[0],
-        function=function,
-        backend=backend,
-        dtype=dtype if dtype is not None else "bfloat16",
-        dtype_w=DTYPE_DICT_REV[Wx.dtype],
-        dtype_r=DTYPE_DICT_REV[R.dtype],
-        dtype_b=DTYPE_DICT_REV[b.dtype],
-    )
-
-
 class _FlashRNNTritonFusedLayer(torch.nn.Module):
     def __init__(self, Wx, R, b, config):
         super(_FlashRNNTritonFusedLayer, self).__init__()
@@ -195,6 +174,7 @@ class FlashRNNTritonFused(torch.nn.Module):
         b_list,
         config=None,
         num_layers=1,
+        function="lstm",
     ):
         super().__init__()
         assert len(Wx_list) == len(R_list) == len(b_list) == num_layers
@@ -205,7 +185,7 @@ class FlashRNNTritonFused(torch.nn.Module):
                 Wx_list[0],
                 R_list[0],
                 b_list[0],
-                function="lstm",
+                function=function,
                 backend="triton_fused",
             )
         for i in range(num_layers):
@@ -230,73 +210,73 @@ class FlashRNNTritonFused(torch.nn.Module):
         return h, last_h, out
 
 
-def build_flashrnn_stack(
-    batch_size,
-    seq_size,
-    num_gate,
-    num_heads=1,
-    hidden_dim=768,
-    num_layers=1,
-    config=None,
-    dtype_str="bfloat16",
-):
-    dtype = getattr(torch, dtype_str)
-    Wx_list = []
-    R_list = []
-    b_list = []
-    # config_list = []
+# def build_flashrnn_stack(
+#     batch_size,
+#     seq_size,
+#     num_gate,
+#     num_heads=1,
+#     hidden_dim=768,
+#     num_layers=1,
+#     config=None,
+#     dtype_str="bfloat16",
+# ):
+#     dtype = getattr(torch, dtype_str)
+#     Wx_list = []
+#     R_list = []
+#     b_list = []
+#     # config_list = []
 
-    # 生成各层网络的输入（Wx，R，b）、配置config
-    for _ in range(num_layers):
-        # Wx shape: [B, T, NG, NH, D]
-        Wx = torch.randn(
-            batch_size,
-            seq_size,
-            num_gate,
-            num_heads,
-            hidden_dim,
-            device="cuda",
-            dtype=dtype,
-            requires_grad=True,
-        )
+#     # 生成各层网络的输入（Wx，R，b）、配置config
+#     for _ in range(num_layers):
+#         # Wx shape: [B, T, NG, NH, D]
+#         Wx = torch.randn(
+#             batch_size,
+#             seq_size,
+#             num_gate,
+#             num_heads,
+#             hidden_dim,
+#             device="cuda",
+#             dtype=dtype,
+#             requires_grad=True,
+#         )
 
-        # R shape: [NG, NH, D, D]
-        R = torch.randn(
-            num_gate,
-            num_heads,
-            hidden_dim,
-            hidden_dim,
-            device="cuda",
-            dtype=dtype,
-            requires_grad=True,
-        )
+#         # R shape: [NG, NH, D, D]
+#         R = torch.randn(
+#             num_gate,
+#             num_heads,
+#             hidden_dim,
+#             hidden_dim,
+#             device="cuda",
+#             dtype=dtype,
+#             requires_grad=True,
+#         )
 
-        # b shape: [NG, NH, D]
-        b = torch.randn(
-            num_gate,
-            num_heads,
-            hidden_dim,
-            device="cuda",
-            dtype=dtype,
-            requires_grad=True,
-        )
-        if config == None:
-            config = _get_config(
-                Wx, R, b, function="lstm", backend="triton_fused", dtype=dtype_str
-            )
+#         # b shape: [NG, NH, D]
+#         b = torch.randn(
+#             num_gate,
+#             num_heads,
+#             hidden_dim,
+#             device="cuda",
+#             dtype=dtype,
+#             requires_grad=True,
+#         )
+#         if config == None:
+#             config = _get_config(
+#                 Wx, R, b, function="lstm", backend="triton_fused", dtype=dtype_str
+#             )
 
-        Wx_list.append(Wx)
-        R_list.append(R)
-        b_list.append(b)
-    model = FlashRNNTritonFused(
-        Wx_list,
-        R_list,
-        b_list,
-        config=config,
-        dtype_str=dtype_str,
-        num_layers=num_layers,
-    )
-    return model
+#         Wx_list.append(Wx)
+#         R_list.append(R)
+#         b_list.append(b)
+#     model = FlashRNNTritonFused(
+#         Wx_list,
+#         R_list,
+#         b_list,
+#         config=config,
+#         dtype_str=dtype_str,
+#         num_layers=num_layers,
+#     )
+#     return model
 
 
 """ FlashRNN 的入口函数
@@ -345,15 +325,15 @@ def flashrnn_triton(
 
     # permute 维度重拍
     states = _permute_output_backward(config, states)
-    print("states shape : ", states.shape)
+    # print("states shape : ", states.shape)
     Wx = _permute_input(config, Wx)
     R = _permute_recurrent_weight(config, R)
     b = _permute_bias(config, b)
     h, last_h = kernel(Wx, states, R, b)
-    print(" h shape : ", h.shape)
-    print(" last_h shape : ", last_h.shape)
-    print("_permute_output(config, h) shape: ", _permute_output(config, h).shape)
-    print(
-        "_permute_output(config, last_h) shape: ", _permute_output(config, last_h).shape
-    )
+    # print(" h shape : ", h.shape)
+    # print(" last_h shape : ", last_h.shape)
+    # print("_permute_output(config, h) shape: ", _permute_output(config, h).shape)
+    # print(
+    #     "_permute_output(config, last_h) shape: ", _permute_output(config, last_h).shape
+    # )
     return _permute_output(config, h), _permute_output(config, last_h)

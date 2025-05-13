@@ -12,14 +12,19 @@ sys.path.append(
     ".."
 )  # 将上一级目录添加到了 Python 的模块搜索路径中，不然会找不到flashrnn包
 
-from flashrnn.flashrnn_multi_layer import flashrnn_multi_layer, flashrnn_stepwise
+from flashrnn.flashrnn_multi_layer import (
+    flashrnn_multi_layer,
+    flashrnn_stepwise,
+    generate_parameter_list,
+)
 
 
 _flashrnn_function_to_num_gates = {
+    "gru": 3,
     "lstm": 4,
     "slstm": 4,
 }
-OUTPUT_DIR = "./outputs_speed_loop"
+OUTPUT_DIR = "./outputs_speed_multi_layer"
 
 
 @dataclass
@@ -58,64 +63,17 @@ class KernelSpeedBenchmarkConfig:
     dtype: Literal["float16", "bfloat16", "float32"] = "bfloat16"
 
 
-def generate_parameter_list(
-    batch_size,
-    seq_size,
-    num_gate,
-    num_heads=1,
-    hidden_dim=768,
-    num_layers=1,
-    device="cuda",
-    dtype=torch.bfloat16,
-    requires_grad=True,
-):
-    Wx_list = []
-    R_list = []
-    x_list = []
-    b_list = []
-    # config_list = []
+def show_peak_mem():
+    torch.cuda.synchronize()
 
-    # 生成各层网络的输入（Wx，R，b）
-    for _ in range(num_layers):
-        # Wx shape: [B, T, NG, NH, D]
-        Wx = torch.randn(
-            [batch_size, seq_size, num_gate, num_heads, hidden_dim],
-            device=device,
-            dtype=dtype,
-            requires_grad=requires_grad,
-        )
+    peak_mem = torch.cuda.max_memory_allocated()
 
-        # R shape: [NG, NH, D, D]
-        R = torch.randn(
-            [num_gate, num_heads, hidden_dim, hidden_dim],
-            device=device,
-            dtype=dtype,
-            requires_grad=requires_grad,
-        ) / (hidden_dim**0.5)
-        x_only = torch.randn(
-            [batch_size, seq_size, num_heads * hidden_dim],
-            device=device,
-            dtype=dtype,
-            requires_grad=requires_grad,
-        )
-        # b shape: [NG, NH, D]
-        b = torch.randn(
-            [num_gate, num_heads, hidden_dim],
-            device=device,
-            dtype=dtype,
-            requires_grad=requires_grad,
-        )
-        Wx_mtr = Wx.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
-        R_mtr = R.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
-        b_mtr = b.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
-        x_only_mtr = (
-            x_only.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
-        )
-        Wx_list.append(Wx_mtr)
-        x_list.append(x_only_mtr)
-        R_list.append(R_mtr)
-        b_list.append(b_mtr)
-    return Wx_list, R_list, x_list, b_list
+    total_mem = torch.cuda.get_device_properties(0).total_memory
+    peak_mem = torch.cuda.max_memory_allocated()
+    util_percent = peak_mem / total_mem * 100
+    print(
+        f"显存使用峰值: {peak_mem / 1024**2:.2f} MB / {total_mem / 1024**2:.2f} MB ({util_percent:.1f}%)"
+    )
 
 
 def create_loop_configs(
@@ -217,6 +175,11 @@ def get_runnable_benchmark(
         bench_config: KernelSpeedBenchmarkConfig = benchmark_config,
         device: str = "cuda",
     ):
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+        # mem_before = torch.cuda.memory_allocated()  # 当前已分配显存（单位：Byte）
+
         dtype = getattr(torch, bench_config.dtype)
 
         # select kernel
@@ -272,6 +235,57 @@ def get_runnable_benchmark(
 
                     if kernel_spec.fwbw:
                         out_full.sum().backward()
+                    # show_peak_mem()
+
+            else:
+
+                def run_kernel_fn():
+                    out = torch_lstm(pt_in)
+                    if kernel_spec.fwbw:
+                        out[0].sum().backward()
+                    # show_peak_mem()
+
+        elif kernel_spec.function == "nn.GRU":
+            nn_gru_dtype_str = kernel_spec.backend.split("-")[-1]
+            nn_gru_dtype = getattr(torch, nn_gru_dtype_str)
+            torch_gru = torch.nn.GRU(
+                input_size=DH * NH,
+                hidden_size=DH * NH,
+                num_layers=LAYER,
+                bias=True,
+                batch_first=True,
+                bidirectional=False,
+            ).to(device=device, dtype=nn_gru_dtype)
+
+            pt_in = (
+                torch.randn([B, T, DH], device=device, dtype=nn_gru_dtype)
+                .clone()
+                .detach()
+                .requires_grad_(True)
+            )
+            if kernel_spec.loop:
+
+                def run_kernel_fn():
+                    h0 = torch.zeros(
+                        LAYER, B, DH * NH, device=device, dtype=nn_lstm_dtype
+                    )
+                    c0 = torch.zeros(
+                        LAYER, B, DH * NH, device=device, dtype=nn_lstm_dtype
+                    )
+
+                    outputs = []
+                    hx = (h0, c0)
+
+                    for t in range(T):  # T 次，每次取一帧
+                        input_t = pt_in[:, t : t + 1, :]  # shape: [B, 1, DH]
+                        out_t, hx = torch_lstm(input_t, hx)
+                        outputs.append(out_t)
+
+                    out_full = torch.cat(outputs, dim=1)  # 拼接成 [B, T, hidden]
+
+                    if kernel_spec.fwbw:
+                        out_full.sum().backward()
+                    # show_peak_mem()
 
             else:
 
@@ -334,6 +348,7 @@ def get_runnable_benchmark(
                     gate_linear=gate_linear,
                     x_only_list=x_list,
                 )
+                show_peak_mem()
 
         print(
             f"[NEW CONFIGURATION] Running speedtest for {provider}, with batch size {B}, num heads {NH}, context size {T}, head dim {DH}, dtype {bench_config.dtype}"
@@ -358,7 +373,7 @@ def get_runnable_benchmark(
 def paper_plot_experiments_additional():
     ### head dimension experiment
     print("====================================")
-    print("MULTI LAYER EXPERIMENT")
+    print("LOOP EXPERIMENT")
     print("====================================")
     batch_size_add_benchmark_config = KernelSpeedBenchmarkConfig(
         benchmark_name="batch_size_exp_additional",
@@ -367,29 +382,31 @@ def paper_plot_experiments_additional():
             # fw
             # "lstm--vanilla++fw",
             # "lstm--vanilla_fwbw++fw",
-            "lstm--triton_fused++fw",
-            "lstm--cuda_fused++fw",
-            "lstm--cuda++fw",
-            "lstm--triton_fused_loop++fw",
-            "lstm--cuda_fused_loop++fw",
-            "lstm--cuda_loop++fw",
+            # "lstm--triton_fused++fw",
+            "gru--cuda_fused++fw",
+            "gru--cuda++fw",
+            # "lstm--triton_fused_loop++fw",
+            "gru--cuda_fused_loop++fw",
+            "gru--cuda_loop++fw",
             # fwbw
             # "lstm--vanilla_fwbw++fwbw",
             # "lstm--vanilla++fwbw",
-            "lstm--triton_fused++fwbw",
-            "lstm--cuda_fused++fwbw",
-            "lstm--cuda++fwbw",
-            "lstm--triton_fused_loop++fwbw",
-            "lstm--cuda_fused_loop++fwbw",
-            "lstm--cuda_loop++fwbw",
+            # "lstm--triton_fused++fwbw",
+            "gru--cuda_fused++fwbw",
+            "gru--cuda++fwbw",
+            # "lstm--triton_fused_loop++fwbw",
+            "gru--cuda_fused_loop++fwbw",
+            "gru--cuda_loop++fwbw",
             ## baselines
-            "nn.LSTM--pytorch-float32++fw",
-            "nn.LSTM--pytorch-float32_loop++fwbw",
+            "nn.GRU--pytorch-float32++fw",
+            "nn.GRU--pytorch-float32_loop++fwbw",
             # "nn.LSTM--pytorch-float16++fw",
             # "nn.LSTM--pytorch-float16++fwbw",
+            # "nn.LSTM--pytorch-bfloat16++fw",
+            # "nn.LSTM--pytorch-bfloat16++fwbw",
         ],
-        warmup=25,
-        rep=500,
+        warmup=5,
+        rep=50,
         dtype="float32",
     )
     #

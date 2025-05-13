@@ -173,10 +173,12 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
     }
 #endif
 
-    // blockIdx.z 被拆分为两个维度：hidden_block_idx = 0 和 multihead_idx = 0
+    // blockIdx.z 被拆分为两个维度：hidden_block_idx 和 multihead_idx 
+    // blockIdx.z  = headId
+    // 因为 hidden_grid_dim =1 ，所以 hidden_block_idx=0
     const uint hidden_block_idx =
         blockIdx.z % hidden_grid_dim; // block在一个head中的相对坐标（head被划分为hidden_grid_dim块）
-    const uint multihead_idx = (blockIdx.z / hidden_grid_dim) * head_dim; // block所在head的入口
+    const uint multihead_idx = (blockIdx.z / hidden_grid_dim) * head_dim; // block所在head的在H的入口 H[headId * D]
 
     /// tile of R within head_dim / Rtdh, FLASHRNN_NUM_GATES_R * head_dim / Rtdg
     // Rtdg是什么
@@ -184,6 +186,7 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
     extern __shared__ float4 sbuf[];
     FLASHRNN_DTYPE_R *R_shared = (FLASHRNN_DTYPE_R *)sbuf; // 储存 tile 内的 recurrent 权重R
 
+    // states 和 biases 加载到寄存器
     FLASHRNN_DTYPE_S
     states_local[CEIL_DIV(FLASHRNN_FORWARD_WARP_LOOPING_COUNT_BATCH * FLASHRNN_FORWARD_WARP_TILING_DIM_BATCH *
                               FLASHRNN_FORWARD_WARP_TILING_DIM_GATE * FLASHRNN_FORWARD_WARP_LOOPING_COUNT_GATE,
@@ -217,7 +220,7 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
 
     // 根据目前的设置
     // batch_idx = 0
-    // block_batch_idx = 8
+    // block_batch_idx = 0
     const uint batch_idx = FWLCB * FWTDB * (blockIdx.y * blockDim.y + threadIdx.y); // 当前线程负责的 全局 batch
                                                                                     // 起始索引
     const uint block_batch_idx = FWLCB * FWTDB * threadIdx.y; // 当前线程在一个 block 内部的 batch 起始偏移
@@ -230,10 +233,13 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
     // gate_warp_local_idx = 0,
     // gate_blocklevel_idx = threadIdx.x % 32
     // gate_warp_overcount = 1
+
+    // threadIdx.x % (blockDim.x / FWTCH)： 线程在x方向(D) 上的block中的warp的线程编号（0-31）
     const uint gate_warp_idx = FWTDG * FWLCG *
-                               ((blockDim.x / FWTCH * blockIdx.x + (threadIdx.x % (blockDim.x / FWTCH))) /
+                               (  (blockDim.x / FWTCH * blockIdx.x + (threadIdx.x % (blockDim.x / FWTCH)))  /
                                 warpSize); // 线程所在的 gate-warp 的全局编号，因为把每个 gate 的 [batch, hidden]
                                            // 矩阵拆成小块（tiles），这些tiles 分配给 warp 来计算
+                                           // (threadIdx.x % (blockDim.x / FWTCH)貌似可以省略
 
     const uint gate_warp_local_idx =
         FWTDG * FWLCG *
@@ -246,7 +252,7 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
 
     if (gate_warp_idx < rgate_dim && batch_idx < batch_dim)
     {
-        uint wtch_idx = threadIdx.x / (blockDim.x / FWTCH); // 当前线程所在warp的block编号（在 block 内的 gate 偏移量）
+        uint wtch_idx = threadIdx.x / (blockDim.x / FWTCH); // 当前线程所在warp的在H方向上的编号（在 block 内的 gate 偏移量）
 
         const uint B_H = batch_dim * FLASHRNN_HIDDEN_SIZE;
         FLASHRNN_DTYPE_A gates[FLASHRNN_NUM_GATES_T];
@@ -260,14 +266,15 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
         nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, FWTDB, FWTDG, FWTDH, MAT_DTYPE, nvcuda::wmma::col_major>
             b_frag_cache[FWLCG][FWRCH];
 
-        // store R to registers 加载R至寄存器
+        // store R to registers 加载R至寄存器 b_frag_cache
         if (FWRCH > 0)
         {
 #pragma unroll
             for (uint wlcg_idx = 0; wlcg_idx < FWLCG; wlcg_idx++)
             {
                 for (uint wrch_idx = 0; wrch_idx < FWRCH; wrch_idx++)
-                {
+                {   // FLASHRNN_NUM_GATES_R * multihead_idx * head_dim = 前面head在R中的所有数据
+                    // FLASHRNN_NUM_GATES_R * head_dim / FRTCG = 4D 被划分为FRTCG份，每个block负责一份
                     uint R_offset = FLASHRNN_NUM_GATES_R * multihead_idx * head_dim +
                                     (blockIdx.x * FLASHRNN_NUM_GATES_R * head_dim / FRTCG + gate_warp_local_idx +
                                      wlcg_idx * FWTDG) *
@@ -352,7 +359,11 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
         for (uint batch_it = 0; batch_it < BatchIterations; batch_it++)
         {
             // 线程取Wx隐藏特征的开始索引，[T, B, igate * H] ， 0 、(1*8)*4*512、 (2*8)*4*512
-            uint input_idx = FLASHRNN_NUM_GATES_I * (batch_idx + batch_it * blockDim.y * gridDim.y * FWLCB * FWTDB) *
+            // FLASHRNN_NUM_GATES_I 在gru是4 ，但是Wx的igate=3 ， 因此会出现越界的错误
+            // uint input_idx = FLASHRNN_NUM_GATES_I * (batch_idx + batch_it * blockDim.y * gridDim.y * FWLCB * FWTDB) *
+            //                  FLASHRNN_HIDDEN_SIZE;
+            // GRU
+            uint input_idx = 3 * (batch_idx + batch_it * blockDim.y * gridDim.y * FWLCB * FWTDB) *
                              FLASHRNN_HIDDEN_SIZE;
 
             // 线程取state隐藏特征的开始索引[S, T, B , H]
@@ -413,6 +424,7 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
                             for (uint local_batch_idx = 0; local_batch_idx < FWLCB; local_batch_idx++)
                             {
                                 // Load the inputs
+                                // states + multihead_idx = state[B][headId*D]
                                 nvcuda::wmma::load_matrix_sync(a_frag,
                                                                states + local_batch_idx * FWTDB * FLASHRNN_HIDDEN_SIZE +
                                                                    multihead_idx + state_offset_loc + midx,
@@ -475,6 +487,7 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
                         for (uint local_batch_idx = wtch_idx * gate_warp_overcount + (threadIdx.x % warpSize) / FWTDG;
                              local_batch_idx < FWLCB * FWTDB; local_batch_idx += FWTCH * gate_warp_overcount)
                         {
+                            // 将每个block中warp的数据都累加到其第一个warp的数据上
                             for (uint local_wtch_idx = 1; local_wtch_idx < FWTCH; local_wtch_idx++)
                             {
                                 mmul_buffer[(local_batch_idx + block_batch_idx) *
@@ -598,6 +611,7 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
 
                         for (uint gidx = 0; gidx < FLASHRNN_NUM_GATES_W; gidx++)
                         {
+                            // Wx[input_idx]出现越界
                             gates[FLASHRNN_NUM_GATES_I - FLASHRNN_NUM_GATES_W + gidx] = float2type<FLASHRNN_DTYPE_A>(
                                 add_g(type2float(gates[FLASHRNN_NUM_GATES_I - FLASHRNN_NUM_GATES_W + gidx]),
                                       type2float(

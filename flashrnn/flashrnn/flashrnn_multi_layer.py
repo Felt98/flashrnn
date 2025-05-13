@@ -4,7 +4,7 @@ import os
 import torch
 from pathlib import Path
 from typing import Optional
-from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV
+from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, _get_config
 from .flashrnn_alternating import FlashRNNCuda, FlashRNNFuncGenerator
 from .flashrnn_fused import FlashRNNCudaFused
 
@@ -151,6 +151,66 @@ def _get_kernel_step(config: FlashRNNConfig):
     return fn
 
 
+def generate_parameter_list(
+    batch_size,
+    seq_size,
+    num_gate,
+    num_heads=1,
+    hidden_dim=768,
+    num_layers=1,
+    device="cuda",
+    dtype=torch.bfloat16,
+    requires_grad=True,
+):
+    Wx_list = []
+    R_list = []
+    x_list = []
+    b_list = []
+    # config_list = []
+
+    # 生成各层网络的输入（Wx，R，b）
+    for _ in range(num_layers):
+        # Wx shape: [B, T, NG, NH, D]
+        Wx = torch.randn(
+            [batch_size, seq_size, num_gate, num_heads, hidden_dim],
+            device=device,
+            dtype=dtype,
+            requires_grad=requires_grad,
+        )
+
+        # R shape: [NG, NH, D, D]
+        R = torch.randn(
+            [num_gate, num_heads, hidden_dim, hidden_dim],
+            device=device,
+            dtype=dtype,
+            requires_grad=requires_grad,
+        ) / (hidden_dim**0.5)
+        x_only = torch.randn(
+            [batch_size, seq_size, num_heads * hidden_dim],
+            device=device,
+            dtype=dtype,
+            requires_grad=requires_grad,
+        )
+        # b shape: [NG, NH, D]
+        b = torch.randn(
+            [num_gate, num_heads, hidden_dim],
+            device=device,
+            dtype=dtype,
+            requires_grad=requires_grad,
+        )
+        Wx_mtr = Wx.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
+        R_mtr = R.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
+        b_mtr = b.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
+        x_only_mtr = (
+            x_only.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
+        )
+        Wx_list.append(Wx_mtr)
+        x_list.append(x_only_mtr)
+        R_list.append(R_mtr)
+        b_list.append(b_mtr)
+    return Wx_list, R_list, x_list, b_list
+
+
 def _get_kernel(config: FlashRNNConfig):
     # if config.backend == "vanilla":
 
@@ -268,6 +328,7 @@ def _get_model(config: FlashRNNConfig):
                 b_list,
                 config=config,
                 num_layers=num_layers,
+                function=config.function,
             )
             return model
 
@@ -280,6 +341,7 @@ def _get_model(config: FlashRNNConfig):
                 b_list,
                 config=config,
                 num_layers=num_layers,
+                function=config.function,
             )
             return model
 
@@ -294,8 +356,12 @@ def _get_model(config: FlashRNNConfig):
                     b_list,
                     config=config,
                     num_layers=num_layers,
+                    function=config.function,
                 )
                 return model
+
+        elif config.function == "gru":
+            raise ValueError(f"Triton doesn't have a GRU kernel yet")
 
     #     elif config.function == "slstm":
     #         from .triton_fused.fwbw import slstm_tr_fwbw
@@ -314,27 +380,6 @@ def _get_model(config: FlashRNNConfig):
         raise ValueError(f"Unknown backend {config.backend}")
 
     return fn
-
-
-def _get_config(
-    Wx: torch.Tensor,
-    R: torch.Tensor,
-    b: torch.Tensor,
-    function: str,
-    backend: str,
-    dtype: Optional[str],
-) -> FlashRNNConfig:
-    return FlashRNNConfig(
-        head_dim=Wx.shape[4],
-        num_heads=Wx.shape[3],
-        batch_size=Wx.shape[0],
-        function=function,
-        backend=backend,
-        dtype=dtype if dtype is not None else "bfloat16",
-        dtype_w=DTYPE_DICT_REV[Wx.dtype],
-        dtype_r=DTYPE_DICT_REV[R.dtype],
-        dtype_b=DTYPE_DICT_REV[b.dtype],
-    )
 
 
 """ FlashRNN 的入口函数
@@ -373,6 +418,7 @@ def flashrnn_multi_layer(
 
     # permute 维度调整，确保数据对齐内核
     states = _permute_output_backward(config, states)
+
     # Wx = _permute_input(config, Wx)
     # R = _permute_recurrent_weight(config, R)
     # b = _permute_bias(config, b)

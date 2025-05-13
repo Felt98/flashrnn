@@ -5,7 +5,7 @@ import copy
 import os
 from pathlib import Path
 from typing import Optional
-from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
+from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT, _get_config
 import torch
 
 from torch.autograd.function import once_differentiable
@@ -224,11 +224,11 @@ def _permute_output_backward(config: FlashRNNConfig, x: torch.Tensor) -> torch.T
     if config._internal_output_backward_permutation is None:
         return x
     else:
-        print(
-            "config._internal_output_backward_permutation: ",
-            config._internal_output_backward_permutation,
-        )
-        print("output_backward_permutation: ", x.shape)
+        # print(
+        #     "config._internal_output_backward_permutation: ",
+        #     config._internal_output_backward_permutation,
+        # )
+        # print("output_backward_permutation: ", x.shape)
         return x.permute(config._internal_output_backward_permutation)
 
 
@@ -260,27 +260,6 @@ def _zero_state(config: FlashRNNConfig, inp: torch.Tensor) -> torch.Tensor:
             for i in range(config.num_states):
                 state[i] += config.initial_val[i]
     return state[None, :].permute(permute_to("TSBHD", config.output_shape))
-
-
-def _get_config(
-    Wx: torch.Tensor,
-    R: torch.Tensor,
-    b: torch.Tensor,
-    function: str,
-    backend: str,
-    dtype: Optional[str],
-) -> FlashRNNConfig:
-    return FlashRNNConfig(
-        head_dim=Wx.shape[4],
-        num_heads=Wx.shape[3],
-        batch_size=Wx.shape[0],
-        function=function,
-        backend=backend,
-        dtype=dtype if dtype is not None else "bfloat16",
-        dtype_w=DTYPE_DICT_REV[Wx.dtype],
-        dtype_r=DTYPE_DICT_REV[R.dtype],
-        dtype_b=DTYPE_DICT_REV[b.dtype],
-    )
 
 
 # 封装成使用kernel的RNN nn.Module
@@ -320,6 +299,7 @@ class FlashRNNCuda(torch.nn.Module):
         b_list,
         config=None,
         num_layers=1,
+        function="lstm",
     ):
         super().__init__()
         assert len(Wx_list) == len(R_list) == len(b_list) == num_layers
@@ -330,27 +310,13 @@ class FlashRNNCuda(torch.nn.Module):
                 Wx_list[0],
                 R_list[0],
                 b_list[0],
-                function="lstm",
+                function=function,
                 backend="cuda",
             )
         for i in range(num_layers):
-            # config = (
-            #     config_list[i]
-            #     if config_list
-            #     else _get_config(
-            #         Wx_list[i],
-            #         R_list[i],
-            #         b_list[i],
-            #         function="lstm",
-            #         backend="cuda_fused",
-            #         dtype=dtype_str,
-            #     )
-            # )
 
-            layer_config = copy.deepcopy(config)  # 深拷贝
-            layer_config.layer_id = i
             self.layers.append(
-                _FlashRNNCudaLayer(Wx_list[i], R_list[i], b_list[i], layer_config)
+                _FlashRNNCudaLayer(Wx_list[i], R_list[i], b_list[i], config)
             )
 
         # self.config = self.layers[0].config  # use first layer's config
@@ -374,72 +340,72 @@ class FlashRNNCuda(torch.nn.Module):
         return h, last_h, out
 
 
-def build_flashrnn_stack(
-    batch_size,
-    seq_size,
-    num_gate,
-    num_heads=1,
-    hidden_dim=768,
-    num_layers=1,
-    config=None,
-    dtype_str="bfloat16",
-):
-    dtype = getattr(torch, dtype_str)
-    Wx_list = []
-    R_list = []
-    b_list = []
-    # config_list = []
+# def build_flashrnn_stack(
+#     batch_size,
+#     seq_size,
+#     num_gate,
+#     num_heads=1,
+#     hidden_dim=768,
+#     num_layers=1,
+#     config=None,
+#     dtype_str="bfloat16",
+# ):
+#     dtype = getattr(torch, dtype_str)
+#     Wx_list = []
+#     R_list = []
+#     b_list = []
+#     # config_list = []
 
-    # 生成各层网络的输入（Wx，R，b）、配置config
-    for _ in range(num_layers):
-        # Wx shape: [B, T, NG, NH, D]
-        Wx = torch.randn(
-            batch_size,
-            seq_size,
-            num_gate,
-            num_heads,
-            hidden_dim,
-            device="cuda",
-            dtype=dtype,
-            requires_grad=True,
-        )
+#     # 生成各层网络的输入（Wx，R，b）、配置config
+#     for _ in range(num_layers):
+#         # Wx shape: [B, T, NG, NH, D]
+#         Wx = torch.randn(
+#             batch_size,
+#             seq_size,
+#             num_gate,
+#             num_heads,
+#             hidden_dim,
+#             device="cuda",
+#             dtype=dtype,
+#             requires_grad=True,
+#         )
 
-        # R shape: [NG, NH, D, D]
-        R = torch.randn(
-            num_gate,
-            num_heads,
-            hidden_dim,
-            hidden_dim,
-            device="cuda",
-            dtype=dtype,
-            requires_grad=True,
-        )
+#         # R shape: [NG, NH, D, D]
+#         R = torch.randn(
+#             num_gate,
+#             num_heads,
+#             hidden_dim,
+#             hidden_dim,
+#             device="cuda",
+#             dtype=dtype,
+#             requires_grad=True,
+#         )
 
-        # b shape: [NG, NH, D]
-        b = torch.randn(
-            num_gate,
-            num_heads,
-            hidden_dim,
-            device="cuda",
-            dtype=dtype,
-            requires_grad=True,
-        )
-        if config == None:
-            config = _get_config(
-                Wx, R, b, function="lstm", backend="cuda", dtype=dtype_str
-            )
+#         # b shape: [NG, NH, D]
+#         b = torch.randn(
+#             num_gate,
+#             num_heads,
+#             hidden_dim,
+#             device="cuda",
+#             dtype=dtype,
+#             requires_grad=True,
+#         )
+#         if config == None:
+#             config = _get_config(
+#                 Wx, R, b, function="lstm", backend="cuda", dtype=dtype_str
+#             )
 
-        Wx_list.append(Wx)
-        R_list.append(R)
-        b_list.append(b)
-    model = FlashRNNCuda(
-        Wx_list,
-        R_list,
-        b_list,
-        config=config,
-        num_layers=num_layers,
-    )
-    return model
+#         Wx_list.append(Wx)
+#         R_list.append(R)
+#         b_list.append(b)
+#     model = FlashRNNCuda(
+#         Wx_list,
+#         R_list,
+#         b_list,
+#         config=config,
+#         num_layers=num_layers,
+#     )
+#     return model
 
 
 """ FlashRNN 的入口函数

@@ -2,7 +2,7 @@ import copy
 import os
 from pathlib import Path
 from typing import Optional
-from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT
+from .config import FlashRNNConfig, permute_to, DTYPE_DICT_REV, DTYPE_DICT, _get_config
 import torch
 
 # from .autotune.constrint import ValueHeuristic, ValueRefinement
@@ -478,16 +478,24 @@ def FlashRNNFuncGeneratorFused(training, config: FlashRNNConfig):
                 grads = flashrnn_cuda.backward_cut(*saved, states_grads.contiguous())
             else:
                 grads = flashrnn_cuda.backward(*saved, states_grads.contiguous())
+            # print("grads[0] before:", grads[0].shape)
+
             with torch.no_grad():
                 S, B, nheads, head_dim, _ = grads[0].shape
                 if config.num_gates_w != config.num_gates_t:
+                    # gru
                     grads[0] = (
                         grads[0]
                         .view(S, B, nheads, head_dim, config.num_gates_i)[
                             :, :, :, :, (config.num_gates_i - config.num_gates_w) :
                         ]
-                        .reshape(S, B, -1)
+                        .permute(
+                            0, 1, 2, 4, 3
+                        )  # 交换最后两个维度：从 (head_dim, num_gates_w) → (num_gates_w, head_dim)
+                        # .reshape(S, B, -1)
                     )
+                    # print("grads[0] after:", grads[0].shape)
+
                 if bs % round_batch_size != 0:
                     grads[0] = grads[0][:, :bs]
                     grads[1] = grads[1][:, :bs]
@@ -563,30 +571,9 @@ def _zero_state(config: FlashRNNConfig, inp: torch.Tensor) -> torch.Tensor:
     return state[None, :].permute(permute_to("TSBHD", config.output_shape))
 
 
-def _get_config(
-    Wx: torch.Tensor,
-    R: torch.Tensor,
-    b: torch.Tensor,
-    function: str,
-    backend: str,
-    dtype: Optional[str],
-) -> FlashRNNConfig:
-    return FlashRNNConfig(
-        head_dim=Wx.shape[4],
-        num_heads=Wx.shape[3],
-        batch_size=Wx.shape[0],
-        function=function,
-        backend=backend,
-        dtype=dtype if dtype is not None else "bfloat16",
-        dtype_w=DTYPE_DICT_REV[Wx.dtype],
-        dtype_r=DTYPE_DICT_REV[R.dtype],
-        dtype_b=DTYPE_DICT_REV[b.dtype],
-    )
-
-
 # 封装成使用kernel的RNN nn.Module
 class _FlashRNNCudaFusedLayer(torch.nn.Module):
-    def __init__(self, Wx, R, b, config=None):
+    def __init__(self, Wx, R, b, config):
         super(_FlashRNNCudaFusedLayer, self).__init__()
         self.Wx = _permute_input(config, Wx)
         self.R = _permute_recurrent_weight(config, R)
@@ -616,6 +603,7 @@ class FlashRNNCudaFused(torch.nn.Module):
         b_list,
         config=None,
         num_layers=1,
+        function="lstm",
     ):
         super().__init__()
         assert len(Wx_list) == len(R_list) == len(b_list) == num_layers
@@ -626,7 +614,7 @@ class FlashRNNCudaFused(torch.nn.Module):
                 Wx_list[0],
                 R_list[0],
                 b_list[0],
-                function="lstm",
+                function=function,
                 backend="cuda_fused",
             )
         for i in range(num_layers):
@@ -659,6 +647,7 @@ def build_flashrnn_stack(
     num_layers=1,
     config=None,
     dtype_str="bfloat16",
+    function="lstm",
 ):
     dtype = getattr(torch, dtype_str)
     Wx_list = []
@@ -702,18 +691,20 @@ def build_flashrnn_stack(
         )
         if config == None:
             config = _get_config(
-                Wx, R, b, function="lstm", backend="cuda_fused", dtype=dtype_str
+                Wx, R, b, function=function, backend="cuda_fused", dtype=dtype_str
             )
 
         Wx_list.append(Wx)
         R_list.append(R)
         b_list.append(b)
+    # print("function: ", function, config.function)
     model = FlashRNNCudaFused(
         Wx_list,
         R_list,
         b_list,
         config=config,
         num_layers=num_layers,
+        function=function,
     )
     return model
 

@@ -18,10 +18,10 @@
 #define FLASHRNN_GRADIENT_RECURRENT_CLIPVAL_VALID false
 #endif
 
-static_assert(FLASHRNN_NUM_GATES_T == 4, "Total gates must be 4");
-static_assert(FLASHRNN_NUM_GATES_I == 4, "Interacting gates must be 4");
-static_assert(FLASHRNN_NUM_GATES_W == 3, "Input-based gates must be 3"); // LSTM是4
-static_assert(FLASHRNN_NUM_GATES_R == 3, "Recurrent gates must be 3");   // LSTM是4
+static_assert(FLASHRNN_NUM_GATES_T == 4, "Total gates must be 4");      // 总门数（用于 bias）
+static_assert(FLASHRNN_NUM_GATES_I == 4, "Interacting gates must be 4"); // 交互门数量，用于反向传播的数据保存
+static_assert(FLASHRNN_NUM_GATES_W == 3, "Input-based gates must be 3"); // Wx的门数，LSTM是4
+static_assert(FLASHRNN_NUM_GATES_R == 3, "Recurrent gates must be 3");   // R的门数，LSTM是4
 
 namespace flashrnn
 {
@@ -103,7 +103,7 @@ __global__ void FLASHRNNPointwiseForward(
         g_r_out[r_idx_r] = float2type<FLASHRNN_DTYPE_G>(rgate);
         g_r_out[z_idx_r] = float2type<FLASHRNN_DTYPE_G>(zgate);
 
-        g_i_out[stride4_base_idx + 0 * head_dim] = float2type<FLASHRNN_DTYPE_G>(graw);
+        g_i_out[stride4_base_idx + 0 * head_dim] = float2type<FLASHRNN_DTYPE_G>(graw);  //保存原始激活值
         g_i_out[stride4_base_idx + 1 * head_dim] = float2type<FLASHRNN_DTYPE_G>(rgate);
         g_i_out[stride4_base_idx + 2 * head_dim] = float2type<FLASHRNN_DTYPE_G>(zgate);
         g_i_out[stride4_base_idx + 3 * head_dim] = float2type<FLASHRNN_DTYPE_G>(nraw);

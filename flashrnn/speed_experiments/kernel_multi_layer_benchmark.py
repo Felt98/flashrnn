@@ -8,18 +8,17 @@ from typing import Literal, Callable
 from kernel_speed_benchmark import create_kernel2style_mapping
 import sys
 
-sys.path.append(
-    ".."
-)  # 将上一级目录添加到了 Python 的模块搜索路径中，不然会找不到flashrnn包
+sys.path.append("..")
 
-from flashrnn.flashrnn_multi_layer import flashrnn_multi_layer
+from flashrnn.flashrnn_multi_layer import flashrnn_multi_layer, generate_parameter_list
 
 
 _flashrnn_function_to_num_gates = {
+    "gru": 3,
     "lstm": 4,
     "slstm": 4,
 }
-OUTPUT_DIR = "./outputs_speed_multi_layer"
+OUTPUT_DIR = "./outputs_speed_multi_layer_gru"
 
 
 @dataclass
@@ -53,66 +52,6 @@ class KernelSpeedBenchmarkConfig:
     dtype: Literal["float16", "bfloat16", "float32"] = "bfloat16"
 
 
-def generate_parameter_list(
-    batch_size,
-    seq_size,
-    num_gate,
-    num_heads=1,
-    hidden_dim=768,
-    num_layers=1,
-    device="cuda",
-    dtype=torch.bfloat16,
-    requires_grad=True,
-):
-    Wx_list = []
-    R_list = []
-    x_list = []
-    b_list = []
-    # config_list = []
-
-    # 生成各层网络的输入（Wx，R，b）
-    for _ in range(num_layers):
-        # Wx shape: [B, T, NG, NH, D]
-        Wx = torch.randn(
-            [batch_size, seq_size, num_gate, num_heads, hidden_dim],
-            device=device,
-            dtype=dtype,
-            requires_grad=requires_grad,
-        )
-
-        # R shape: [NG, NH, D, D]
-        R = torch.randn(
-            [num_gate, num_heads, hidden_dim, hidden_dim],
-            device=device,
-            dtype=dtype,
-            requires_grad=requires_grad,
-        ) / (hidden_dim**0.5)
-        x_only = torch.randn(
-            [batch_size, seq_size, num_heads * hidden_dim],
-            device=device,
-            dtype=dtype,
-            requires_grad=requires_grad,
-        )
-        # b shape: [NG, NH, D]
-        b = torch.randn(
-            [num_gate, num_heads, hidden_dim],
-            device=device,
-            dtype=dtype,
-            requires_grad=requires_grad,
-        )
-        Wx_mtr = Wx.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
-        R_mtr = R.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
-        b_mtr = b.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
-        x_only_mtr = (
-            x_only.clone().to(dtype=dtype).detach().requires_grad_(requires_grad)
-        )
-        Wx_list.append(Wx_mtr)
-        x_list.append(x_only_mtr)
-        R_list.append(R_mtr)
-        b_list.append(b_mtr)
-    return Wx_list, R_list, x_list, b_list
-
-
 def create_multi_layer_configs(
     benchmark_config: KernelSpeedBenchmarkConfig,
     # dh_nh_pairs: list[tuple[int, int]] = [(64, 12), (768, 1)],
@@ -130,7 +69,7 @@ def create_multi_layer_configs(
 
     configs.append(
         triton.testing.Benchmark(
-            # D不能低于32
+            # D不能低于32,需要和16对齐
             x_names=["LAYER", "DH", "NH"],
             x_vals=[
                 (2, 32, 2),
@@ -185,7 +124,7 @@ def get_flashrnn_multi_layer_kernel_benchmark_fn(kernel_spec: KernelSpec) -> Cal
             Wx_list,
             R_list,
             b_list,
-            num_layer=LAYER,
+            num_layers=LAYER,
             states=None,
             function=kernel_spec.function,
             backend=kernel_spec.backend,
@@ -249,6 +188,30 @@ def get_runnable_benchmark(
 
             def run_kernel_fn():
                 out = torch_lstm(pt_in)
+                if kernel_spec.fwbw:
+                    out[0].sum().backward()
+
+        elif kernel_spec.function == "nn.GRU":
+            nn_gru_dtype_str = kernel_spec.backend.split("-")[-1]
+            nn_gru_dtype = getattr(torch, nn_gru_dtype_str)
+            torch_gru = torch.nn.GRU(
+                input_size=DH * NH,
+                hidden_size=DH * NH,
+                num_layers=LAYER,
+                bias=True,
+                batch_first=True,
+                bidirectional=False,
+            ).to(device=device, dtype=nn_gru_dtype)
+
+            pt_in = (
+                torch.randn([B, T, DH], device=device, dtype=nn_gru_dtype)
+                .clone()
+                .detach()
+                .requires_grad_(True)
+            )
+
+            def run_kernel_fn():
+                out = torch_gru(pt_in)
                 if kernel_spec.fwbw:
                     out[0].sum().backward()
 
@@ -339,23 +302,29 @@ def paper_plot_experiments_additional():
             # fw
             # "lstm--vanilla++fw",
             # "lstm--vanilla_fwbw++fw",
-            "lstm--triton_fused++fw",
-            "lstm--cuda_fused++fw",
-            "lstm--cuda++fw",
+            # "gru--triton_fused++fw",
+            "gru--cuda_fused++fw",
+            "gru--cuda++fw",
             # fwbw
             # "lstm--vanilla_fwbw++fwbw",
             # "lstm--vanilla++fwbw",
-            "lstm--triton_fused++fwbw",
-            "lstm--cuda_fused++fwbw",
-            "lstm--cuda++fwbw",
+            # "lstm--triton_fused++fwbw",
+            "gru--cuda_fused++fwbw",
+            "gru--cuda++fwbw",
             ## baselines
-            "nn.LSTM--pytorch-float32++fw",
-            "nn.LSTM--pytorch-float32++fwbw",
-            "nn.LSTM--pytorch-float16++fw",
-            "nn.LSTM--pytorch-float16++fwbw",
+            # "nn.LSTM--pytorch-float32++fw",
+            # "nn.LSTM--pytorch-float32++fwbw",
+            # "nn.LSTM--pytorch-float16++fw",
+            # "nn.LSTM--pytorch-float16++fwbw",
+            "nn.GRU--pytorch-float32++fw",
+            "nn.GRU--pytorch-float32++fwbw",
+            # "nn.GRU--pytorch-float16++fw",
+            # "nn.GRU--pytorch-float16++fwbw",
+            # "nn.GRU--pytorch-bfloat16++fw",
+            # "nn.GRU--pytorch-bfloat16++fwbw",
         ],
-        warmup=25,
-        rep=500,
+        warmup=10,
+        rep=100,
         dtype="float32",
     )
     #

@@ -245,6 +245,7 @@ def create_inputs(
         device=device,
         dtype=dtype,
     )
+
     states = _zero_state(cfg, Wx)
     assert states.dtype == dtype
 
@@ -304,37 +305,34 @@ def model_test(
     )
 
     if include_backward:
-        res = (
-            res
-            and check_backward(
-                lambda Wx, R, b, states: flashrnn(
-                    Wx,
-                    R,
-                    b,
-                    states,
-                    function=function,
-                    backend=backend,
-                    dtype=torch_dtype_to_str(dtype),
-                )[0][0],
-                lambda Wx, R, b, states: flashrnn(
-                    Wx,
-                    R,
-                    b,
-                    states,
-                    function=function,
-                    backend=backend_cmp,
-                    dtype=torch_dtype_to_str(dtype),
-                )[0][0],
-                input_grad_mask=[
-                    None,
-                    None,
-                    None,
-                    lambda x: torch.tensor(0.0),
-                ],  # do no test initial state gradients for empty default state (different m behavior)
-                inputs=(Wx, R, b, states),
-                show_plot_diff=False,
-                **tensor_compare_kwargs,
-            )
+        res = res and check_backward(
+            lambda Wx, R, b, states: flashrnn(
+                Wx,
+                R,
+                b,
+                states,
+                function=function,
+                backend=backend,
+                dtype=torch_dtype_to_str(dtype),
+            )[0][0],
+            lambda Wx, R, b, states: flashrnn(
+                Wx,
+                R,
+                b,
+                states,
+                function=function,
+                backend=backend_cmp,
+                dtype=torch_dtype_to_str(dtype),
+            )[0][0],
+            input_grad_mask=[
+                None,
+                None,
+                None,
+                lambda x: torch.tensor(0.0),
+            ],  # do no test initial state gradients for empty default state (different m behavior)
+            inputs=(Wx, R, b, states),
+            show_plot_diff=False,
+            **tensor_compare_kwargs,
         )
 
     return res
