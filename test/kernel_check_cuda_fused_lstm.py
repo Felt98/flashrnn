@@ -1,10 +1,11 @@
 import os
 import torch
 from tqdm import tqdm
-from models.lstm_fused import LSTMFused
 import sys
 
 sys.path.append("..")
+from models.lstm_fused import LSTMFused
+
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 

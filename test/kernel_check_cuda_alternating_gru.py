@@ -1,10 +1,11 @@
 import os
 import torch
 from tqdm import tqdm
-from models.gru_cuda import GRUCuda
 import sys
 
 sys.path.append("..")
+from models.gru_cuda import GRUCuda
+
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
