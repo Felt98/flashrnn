@@ -153,7 +153,9 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
                              FLASHRNN_DTYPE_G *g_r_out,  // Output activations (Wx + Ry + b) [], also
                                                          // contains gate values [T, G-1, B, H] other gates
                              FLASHRNN_DTYPE_G *g_i_out,  // [FLASHRNN_NUM_GATES_T, T, B, H]?  input gate
-                             ACC_DTYPE *gate_buffer)
+                             ACC_DTYPE *gate_buffer,
+                             FLASHRNN_DTYPE_G *tmp_Ry_all
+                             )
 {
     // 每一个头的隐藏维度
     const uint head_dim = FLASHRNN_HIDDEN_SIZE / FLASHRNN_NUM_HEADS;
@@ -254,7 +256,7 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
         uint wtch_idx = threadIdx.x / (blockDim.x / FWTCH); // 当前线程所在warp的在H方向上的编号（在 block 内的 gate 偏移量）
 
         const uint B_H = batch_dim * FLASHRNN_HIDDEN_SIZE;
-        FLASHRNN_DTYPE_A gates[FLASHRNN_NUM_GATES_T];
+        FLASHRNN_DTYPE_A gates[FLASHRNN_NUM_GATES_T];   // gates=Wx+ R@states + b , 每个线程负责一个gates[4]元素的计算
 #if FLASHRNN_FORWARD_RECURRENT_TILING_COUNT_GATE * FLASHRNN_FORWARD_RECURRENT_TILING_COUNT_HIDDEN > 1
         cg::grid_group gr = cg::this_grid();
 #endif
@@ -511,9 +513,9 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
                 }
                 __syncthreads();
 
-#if FLASHRNN_FORWARD_RECURRENT_TILING_COUNT_HIDDEN > 1
+#if FLASHRNN_FORWARD_RECURRENT_TILING_COUNT_HIDDEN > 1  //如果单个head中，D(H)方向超过1个tile(block)
                 // store in global memory aligned with floats
-
+                // 将Ry存储到全局内存gate_buffer？
                 const uint gate_overthreading_warp_idx = (threadIdx.x % warpSize) / FWTDG;
                 const uint gate_overthreading_warp_count = warpSize / FWTDG;
                 // const uint gate_overthreading_idx =
@@ -570,7 +572,8 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
                         const uint global_state_idx = multihead_idx +
                                                       (gate_warp_idx - gate_warp_local_idx) / FLASHRNN_NUM_GATES_R +
                                                       local_state_idx;
-
+                        
+                        // b累加到gates
                         for (uint gidx = 0; gidx < FLASHRNN_NUM_GATES_T; gidx++)
                         {
                             gates[gidx] = float2type<FLASHRNN_DTYPE_A>(type2float(biases_local[wlcg_idx][gidx]));
@@ -580,11 +583,13 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
 #pragma unroll
                         for (uint gidx = 0; gidx < FLASHRNN_NUM_GATES_R; gidx++)
                         {
+                            // acc 当前线程负责的单个 Ry数据
                             float acc = type2float(*(mmul_buffer +
                                                      (block_batch_idx + local_batch_idx) *
                                                          (FLASHRNN_NUM_GATES_R * head_dim / FRTCG + FSMP) +
                                                      gidx + FLASHRNN_NUM_GATES_R * local_state_idx));
-#pragma unroll
+#pragma unroll              
+                            //如果head的D有多个tile，则从全局内存gate_buffer中取出数据累加到acc
                             for (uint acc_idx = 1; acc_idx < FRTCH; acc_idx++)
                             {
                                 const uint int_acc_idx = (hidden_block_idx + acc_idx) % FRTCH;
@@ -597,17 +602,28 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
                             if (!FLASHRNN_SIMPLE_AGG)
                             {
                                 // save Ry for backward
+                                // g_r_out 存储了每一步Ry的结果
                                 g_r_out[B_H * FLASHRNN_NUM_GATES_R * t +
                                         (batch_idx + batch_it * blockDim.y * gridDim.y * FWLCB * FWTDB +
                                          local_batch_idx) *
                                             FLASHRNN_HIDDEN_SIZE * FLASHRNN_NUM_GATES_R +
                                         FLASHRNN_NUM_GATES_R * global_state_idx + gidx] =
                                     float2type<FLASHRNN_DTYPE_G>(acc);
+
+                                tmp_Ry_all[B_H * FLASHRNN_NUM_GATES_R * t +
+                                    (batch_idx + batch_it * blockDim.y * gridDim.y * FWLCB * FWTDB +
+                                     local_batch_idx) *
+                                        FLASHRNN_HIDDEN_SIZE * FLASHRNN_NUM_GATES_R +
+                                    FLASHRNN_NUM_GATES_R * global_state_idx + gidx] =
+                                float2type<FLASHRNN_DTYPE_G>(acc);
+
                                 acc = FLASHRNNRecurrentActivation(acc, gidx);
                             }
+                            // R@states累加到gates
                             gates[gidx] = float2type<FLASHRNN_DTYPE_A>(add_g(type2float(gates[gidx]), acc));
                         }
-
+                        
+                        // 累加Wx到gates
                         for (uint gidx = 0; gidx < FLASHRNN_NUM_GATES_W; gidx++)
                         {
                             // Wx[input_idx]出现越界
@@ -620,6 +636,8 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
 
                         const uint state_pos = state_offset + local_batch_idx * FLASHRNN_HIDDEN_SIZE + global_state_idx;
                         // pointwise operations
+                        // gates = Wx + R@states + b
+                        // 线程负责的gates[4]做门激活，并更新其负责的states数据
                         FLASHRNNPointwiseForward<Training>(
                             states_local[local_it], gates, 1, states + state_pos + B_H,
                             states + state_pos + B_H * (steps + 1) + B_H, B_H * (steps + 1),
@@ -641,8 +659,8 @@ __global__ void __launch_bounds__(_FUSED_KERNEL_MAX_THREADS, _FUSED_KERNEL_MIN_B
                 __syncthreads();
 #endif
 
-                input_idx += FLASHRNN_NUM_GATES_W * B_H;
-                state_offset += B_H;
+                input_idx += FLASHRNN_NUM_GATES_W * B_H;    // 跨到下一个步长t+1
+                state_offset += B_H;                        // 跨到下一个步长t+1
             }
         }
     }
@@ -762,7 +780,7 @@ int ForwardPass::Run(const int steps,
                      const FLASHRNN_DTYPE_W *x, // Input vector [T,N,C]
                      FLASHRNN_DTYPE_S *s,       // Cell states [S+1,N,H]
                      FLASHRNN_DTYPE_G *g_r,     // Output vector (Wx + Ry + b) [S,N,H*3])
-                     FLASHRNN_DTYPE_G *g_i, FLASHRNN_ACC_DTYPE *gate_buffer)
+                     FLASHRNN_DTYPE_G *g_i, FLASHRNN_ACC_DTYPE *gate_buffer,FLASHRNN_DTYPE_G*tmp_Ry_all)
 { // Output vector (Wx + Ry + b) [S,N,H]
     const blas<void>::set_pointer_mode scoped1(data_->main_blas_handle);
 
@@ -861,7 +879,7 @@ int ForwardPass::Run(const int steps,
     // FLASHRNN_FORWARD_MULTIHEAD_TILING_COUNT： 每次循环让grid处理的头数
     for (uint i = 0; i < FLASHRNN_NUM_HEADS / FLASHRNN_FORWARD_MULTIHEAD_TILING_COUNT; i++)
     {
-        uint head_idx = i * head_dim * FLASHRNN_FORWARD_MULTIHEAD_TILING_COUNT; // 当前头的在H中的起始维度坐标
+        uint head_idx = i * head_dim * FLASHRNN_FORWARD_MULTIHEAD_TILING_COUNT; // 当前头的在H中的起始维度坐标，grid不能一次性处理完所有头才有用
         cudaStreamWaitEvent(stream_K[i], event_K[0]);
 
 #if FLASHRNN_FORWARD_RECURRENT_TILING_COUNT_GATE * FLASHRNN_FORWARD_RECURRENT_TILING_COUNT_HIDDEN > 1
@@ -876,7 +894,7 @@ int ForwardPass::Run(const int steps,
 
         // kernel的参数
         void *kernelArgs[] = {(void *)&steps, (void *)&batch_size, (void *)&x_h,   (void *)&R_h,          (void *)&b_h,
-                              (void *)&s_h,   (void *)&g_r_h,      (void *)&g_i_h, (void *)&gate_buffer_h};
+                              (void *)&s_h,   (void *)&g_r_h,      (void *)&g_i_h, (void *)&gate_buffer_h,(void*)&tmp_Ry_all};
 
         // 调用前向的kernel
         err = cudaLaunchCooperativeKernel((void *)kernel, gridDim, blockDim, kernelArgs, sharedMemorySize, stream_K[i]);
@@ -885,7 +903,7 @@ int ForwardPass::Run(const int steps,
         kernel<<<gridDim, blockDim, sharedMemorySize, stream_K[i]>>>(
             steps, batch_size, x + FLASHRNN_NUM_GATES_W * head_idx, R + FLASHRNN_NUM_GATES_R * head_dim * head_idx,
             b + FLASHRNN_NUM_GATES_T * head_idx, s + head_idx, g_r + FLASHRNN_NUM_GATES_R * head_idx,
-            g_i + FLASHRNN_NUM_GATES_I * head_idx, (ACC_DTYPE *)gate_buffer + FLASHRNN_NUM_GATES_R * head_idx);
+            g_i + FLASHRNN_NUM_GATES_I * head_idx, (ACC_DTYPE *)gate_buffer + FLASHRNN_NUM_GATES_R * head_idx,tmp_Ry_all);
 
 #endif
         cudaEventRecord(event_K[i], stream_K[i]);

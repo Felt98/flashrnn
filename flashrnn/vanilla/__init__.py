@@ -36,14 +36,14 @@ def flashrnn_forward(
     batch_dim = Wx.shape[1]
     num_heads = R.shape[0]
     head_dim = R.shape[3]
-
+    num_gates_t = 4
     assert batch_dim == states.shape[1]
 
-    # g = torch.zeros(
-    #     [sequence_dim + 1, batch_dim, num_gates_t, num_heads, head_dim],
-    #     device=Wx.device,
-    #     dtype=Wx.dtype,
-    # )
+    g = torch.zeros(
+        [sequence_dim + 1, batch_dim, num_gates_t, num_heads, head_dim],
+        device=Wx.device,
+        dtype=Wx.dtype,
+    )
 
     states_all = torch.zeros(
         [sequence_dim + 1, batch_dim, num_states, num_heads, head_dim],
@@ -56,7 +56,9 @@ def flashrnn_forward(
 
     # Wx_t_list = Wx.unbind(dim=0)  # list of T tensors of shape [B,GI,H]
     # Wx_t 是一个 [B,GI,H] 的 tensor，对应第 i 个时间步的输入
+    # Ry_list = torch.zeros(sequence_dim,batch_dim
     Ry_list = []
+    gates = []
     for i, Wx_t in enumerate(Wx.unbind(dim=0)):
         Ry = (
             states[:, 0]  # 第一状态 ht @ R
@@ -66,22 +68,24 @@ def flashrnn_forward(
             .transpose(1, 2)
         )
         Ry_list.append(Ry)
-        states, _ = pointwise_forward(Wx_t, Ry, b, states, constants=constants)
-        # g[i] = gates
+        states, gates = pointwise_forward(Wx_t, Ry, b, states, constants=constants)
+        g[i] = gates
         states_all[i + 1] = states
 
-    if debug:
-        debug_path = "../debug/debug_vanilla_ry_list_lstm.pt"
-        os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+    # if debug:
+    #     debug_path = "../debug/debug_vanilla_ry_list_lstm.pt"
+    #     os.makedirs(os.path.dirname(debug_path), exist_ok=True)
 
-        print(f"Saving vanilla Ry list for debug. Saved to: {debug_path}")
-        torch.save(Ry_list, debug_path)
+    #     print(f"Saving vanilla Ry list for debug. Saved to: {debug_path}")
+    #     torch.save(Ry_list, debug_path)
 
     # shapes ([T, B, S, N, H], [S, B, 4, N, H])
     return (
         states_all[1:].view(sequence_dim, batch_dim, num_states, num_heads, head_dim),
         states.view(1, batch_dim, num_states, num_heads, head_dim),
         states_all,
+        Ry_list,
+        g,
     )
 
 

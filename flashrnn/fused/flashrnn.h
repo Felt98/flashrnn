@@ -53,7 +53,7 @@ public:
 
   int Run(const int steps, const FLASHRNN_DTYPE_R *R, const FLASHRNN_DTYPE_B *b,
           const FLASHRNN_DTYPE_W *x, FLASHRNN_DTYPE_S *s, FLASHRNN_DTYPE_G *g_r,
-          FLASHRNN_DTYPE_G *g_i, FLASHRNN_ACC_DTYPE *gate_buffer);
+          FLASHRNN_DTYPE_G *g_i, FLASHRNN_ACC_DTYPE *gate_buffer,FLASHRNN_DTYPE_G* tmp_Ry_all);
 
 private:
   struct private_data;

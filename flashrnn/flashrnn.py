@@ -212,6 +212,7 @@ def _get_kernel(config: FlashRNNConfig):
 
     # alternate版 cuda
     elif config.backend == "cuda":
+        print("===========cuda=======")
 
         def fn(Wx_list, states, R_list, b_list, num_layers=1, **kwargs):
             model = FlashRNNCuda(
@@ -224,6 +225,7 @@ def _get_kernel(config: FlashRNNConfig):
             return model(states)
 
     elif config.backend == "cuda_fused":
+        print("===========cuda_fused=======")
 
         def fn(Wx_list, states, R_list, b_list, num_layers=1, **kwargs):
             model = FlashRNNCudaFused(
@@ -313,9 +315,11 @@ def flashrnn(
 ):
     # if backend in ("vanilla", "vanilla_fwbw"):
     #     backend = "cuda_fused"
+    print("config.backend:", config.backend)
+
     if config is None:
         config = _get_config(Wx, R, b, function, backend, dtype=dtype)
-
+    print("config.backend:", config.backend)
     kernel = _get_kernel(config)
     if states is None:
         states = _zero_state(config, Wx)
@@ -335,7 +339,7 @@ def flashrnn(
     Wx_list = [Wx]
     R_list = [R]
     b_list = [b]
-    h, last_h, out = kernel(
+    h, last_h, out, Ry_all, gates = kernel(
         Wx_list,
         states,
         R_list,
@@ -344,7 +348,7 @@ def flashrnn(
     print("h: ", h.shape)
     print("last_h: ", last_h.shape)
     # print("out: ", out.shape)
-    return _permute_output(config, h), _permute_output(config, last_h)
+    return _permute_output(config, h), _permute_output(config, last_h), Ry_all, gates
 
 
 def flashrnn_debug(

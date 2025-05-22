@@ -93,8 +93,11 @@ class FlashRNNFuncFused
                                      options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_S>()));
         Tensor gate_cache_r;
         Tensor gate_cache_i;
+        Tensor tmp_Ry_all;
         // if (training) {
         gate_cache_r = torch::empty({time_steps, batch_size, num_heads, head_dim, FLASHRNN_NUM_GATES_R},
+                                    options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_G>()));
+        tmp_Ry_all = torch::empty({time_steps, batch_size, num_heads, head_dim, FLASHRNN_NUM_GATES_R},
                                     options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_G>()));
 #if FLASHRNN_SIMPLE_AGG
         gate_cache_i = torch::empty({}, options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_G>()));
@@ -110,6 +113,7 @@ class FlashRNNFuncFused
                              FLASHRNN_FORWARD_WARP_TILING_DIM_BATCH,
                          FLASHRNN_NUM_GATES_R * hidden_size},
                         options.dtype(torch::kFloat32));
+        Tensor tmp_Ry = torch::empty({batch_size,hidden_size * FLASHRNN_NUM_GATES_R},options.dtype(typeToTorchDtype<FLASHRNN_DTYPE_G>()));
         for (uint i = 0; i < FLASHRNN_NUM_STATES; i++)
         {
             states[i][0] = s0[i];
@@ -126,13 +130,14 @@ class FlashRNNFuncFused
                              reinterpret_cast<FLASHRNN_DTYPE_S *>(states.data_ptr()),
                              reinterpret_cast<FLASHRNN_DTYPE_G *>(gate_cache_r.data_ptr()),
                              reinterpret_cast<FLASHRNN_DTYPE_G *>(gate_cache_i.data_ptr()),
-                             reinterpret_cast<FLASHRNN_ACC_DTYPE *>(gate_buffer.data_ptr()));
+                             reinterpret_cast<FLASHRNN_ACC_DTYPE *>(gate_buffer.data_ptr()),
+                             reinterpret_cast<FLASHRNN_DTYPE_G *>(tmp_Ry_all.data_ptr()));
             }));
         if (res != 0)
         {
             TORCH_CHECK(0, "Errors during CUDA kernel calls forward.");
         }
-        return {states, gate_cache_r, gate_cache_i};
+        return {states, gate_cache_r, gate_cache_i,tmp_Ry_all};
     }
 
 

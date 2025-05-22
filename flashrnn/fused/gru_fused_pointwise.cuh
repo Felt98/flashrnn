@@ -31,6 +31,8 @@ __device__ __forceinline__ float FLASHRNNRecurrentActivation(float Ry,
   return Ry;
 }
 
+// raw_gates = gates
+// gates_stride == 1
 template <bool Training>
 __device__ __forceinline__ void FLASHRNNPointwiseForward(
     FLASHRNN_DTYPE_S *states_local, const FLASHRNN_DTYPE_A *raw_gates,

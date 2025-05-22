@@ -416,7 +416,9 @@ def FlashRNNFuncGeneratorFused(training, config: FlashRNNConfig):
                 inputs[2].to(dtype=config.torch_dtype_r).contiguous(),
                 inputs[3].to(dtype=config.torch_dtype_b).contiguous(),
             )
-            states, cache_g_r, cache_g_i = flashrnn_cuda.forward(training, *inputs)
+            states, cache_g_r, cache_g_i, tmp_Ry_all = flashrnn_cuda.forward(
+                training, *inputs
+            )
             if bs % round_batch_size != 0:
                 states = states[:, :, :bs]
                 cache_g_r = cache_g_r[:, :bs]
@@ -424,7 +426,7 @@ def FlashRNNFuncGeneratorFused(training, config: FlashRNNConfig):
                     cache_g_i = cache_g_i[:, :bs]
             ctx.save_for_backward(*inputs[2:], states, cache_g_r, cache_g_i)
             ctx.training = training
-            return states
+            return states, tmp_Ry_all, cache_g_r
 
         @staticmethod
         @conditional_decorator(
@@ -583,15 +585,15 @@ class _FlashRNNCudaFusedLayer(torch.nn.Module):
         self.config = config
 
     def forward(self, states):
-        print("states,in multilayer : ", states.shape)
-        print("states input[:, 0],in multilayer : ", states[:, 0].shape)
+        # print("states,in multilayer : ", states.shape)
+        # print("states input[:, 0],in multilayer : ", states[:, 0].shape)
         kernel = FlashRNNFuncGeneratorFused(torch.is_grad_enabled(), config=self.config)
-        print("Wx.shape: ", self.Wx.shape)
-        print("R.shape: ", self.R.shape)
-        print("b.shape: ", self.b.shape)
-        print("state.shape: ", states.shape)
+        # print("Wx.shape: ", self.Wx.shape)
+        # print("R.shape: ", self.R.shape)
+        # print("b.shape: ", self.b.shape)
+        # print("state.shape: ", states.shape)
         # print("Wx:", self.Wx)
-        states = kernel.apply(
+        states, Ry_all, gates = kernel.apply(
             torch.is_grad_enabled(),
             self.Wx.contiguous(),
             states[:, 0].contiguous(),
@@ -601,7 +603,7 @@ class _FlashRNNCudaFusedLayer(torch.nn.Module):
         # h = states[:, 1:]
         # last_h = states[:, -1:]
         # return _permute_output(self.config, h), _permute_output(self.config, last_h)
-        return states
+        return states, Ry_all, gates
 
 
 class FlashRNNCudaFused(torch.nn.Module):
@@ -640,11 +642,11 @@ class FlashRNNCudaFused(torch.nn.Module):
 
         out = states
         for layer in self.layers:
-            out = layer(out)
+            out, Ry_all, gates = layer(out)
 
         h = out[:, 1:]
         last_h = out[:, -1:]
-        return h, last_h, out
+        return h, last_h, out, Ry_all, gates
 
 
 def build_flashrnn_stack(
